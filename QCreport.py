@@ -72,6 +72,11 @@ def round2center(num, gridsize):
     return num - (num%gridsize) + hgridsize
 
 
+# round number to nearest timezone longitude
+def round2lon(num):
+    return 15 * round(num / 15.)
+
+
 # add corresponding centers to catalog
 def addcenters(catalog, gridsize):
     zippedlatlon = list(zip(round2center(catalog['latitude'], gridsize),
@@ -478,8 +483,8 @@ def mapDetecNums(catalog, dirname, title='', proj='cyl', lon0=0, res='c',
 def makeHist(catalog, param, binsize, dirname, color='b', title='', xlabel='', 
              ylabel='Count', countlabel=False):
 
-    paramlist = catalog[pd.notnull(catalog[param])][param]
-    minparam, maxparam = paramlist.min(), paramlist.max()
+    paramlist = catalog[pd.notnull(catalog[param])][param].tolist()
+    minparam, maxparam = min(paramlist), max(paramlist)
     paramdown = round2bin(minparam, binsize, 'down')
     paramup = round2bin(maxparam, binsize, 'up')
     numbins = int((paramup-paramdown) / binsize)
@@ -532,11 +537,24 @@ def makeTimeHist(catalog, timelength, dirname, title='', xlabel='',
     plt.ylabel(ylabel, fontsize=14)
 
     if (timelength == 'hour'):
-        hourlist = [int(x.split('T')[1].split(':')[0]) for x in timelist]
+        lons = np.linspace(-180, 180, 25).tolist()
+        hours = np.linspace(-12, 12, 25).tolist()
+
+        tlonlist = catalog.loc[:, ['longitude', 'time']]
+        tlonlist.loc[:, 'rLon'] = round2lon(tlonlist['longitude'])
+
+        tlonlist.loc[:, 'hour'] = [int(x.split('T')[1].split(':')[0])
+                                   for x in tlonlist['time']]
+        tlonlist.loc[:, 'rhour'] = [x.hour + hours[lons.index(x.rLon)]
+                                    for x in tlonlist.itertuples()]
+
+        tlonlist.loc[:, 'rhour'] = [x+24 if x<0 else x-24 if x>23 else x
+                                    for x in tlonlist['rhour']]
+
+        hourlist = tlonlist.rhour.tolist()
         hourbins = np.linspace(-0.5, 23.5, 25)
 
-        h = plt.hist(hourlist, hourbins, alpha=0.7, color='b', edgecolor='k')
-        maxbarheight = max([h[0][x] for x in range(24)] or [0])
+        plt.hist(hourlist, hourbins, alpha=0.7, color='b', edgecolor='k')
         plt.xlabel('Hour of the Day', fontsize=14)
         plt.xlim(-0.5, 23.5)
 
@@ -556,7 +574,7 @@ def makeTimeHist(catalog, timelength, dirname, title='', xlabel='',
         eqdates = [date(x[0], x[1], x[2]) for x in eqdates]
         minday, maxday = min(eqdates), max(eqdates)
 
-        h = plt.bar(eqdates, counts, alpha=1, color='b', width=1)
+        plt.bar(eqdates, counts, alpha=1, color='b', width=1)
         plt.xlabel('Date', fontsize=14)
         plt.xlim(minday, maxday)
 
@@ -793,63 +811,76 @@ def main():
 
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('catalog', nargs='?', default='',
+    parser.add_argument('catalog', nargs='?', type=str, default='',
                         help='pick which catalog to download data from')
-    parser.add_argument('startyear', help='pick starting year')
-    parser.add_argument('endyear', help='pick end year (to get a single year \
-                        of data, enter same year as startyear)')
+    parser.add_argument('startyear', nargs='?', type=int, default=2000,
+                        help='pick starting year')
+    parser.add_argument('endyear', nargs='?', type=int, default=2000,
+                        help='pick end year (to get a single year of data, \
+                        enter same year as startyear)')
 
+    parser.add_argument('-sf', '--specifyfile', type=str,
+                        help='specify existing .csv file to use')
     parser.add_argument('-fd', '--forcedownload', action='store_true',
                         help='forces downloading of data even if .csv file\
                         exists')
 
     args = parser.parse_args()
-    catalog = args.catalog.lower()
-    startyear, endyear = map(int, [args.startyear, args.endyear])
-    download = args.forcedownload
 
-    dirname = '%s%s-%s' % (catalog, startyear, endyear) if catalog else\
-              'all%s-%s' % (startyear, endyear)
+    if args.specifyfile is None:
 
-    if download:
-        try:
-            os.makedirs(dirname)
-        except OSError as exception:
-            if exception.errno != errno.EEXIST:
-                raise
-        datadf = getData(catalog, startyear, endyear, write=True)
-    else:
-        # Python 2
-        try:
-            try:
-                datadf = pd.read_csv('%s/%s.csv' % (dirname, dirname))
-            except IOError:
-                try:
-                    os.makedirs(dirname)
-                except OSError as exception:
-                    if exception.errno != errno.EEXIST:
-                        raise
-                datadf = getData(catalog, startyear, endyear, write=True)
-        # Python 3
-        except:
-            try:
-                datadf = pd.read_csv('%s/%s.csv' % (dirname, dirname))
-            except FileNotFoundError:
-                try:
-                    os.makedirs(dirname)
-                except OSError as exception:
-                    if exception.errno != errno.EEXIST:
-                        raise
-                datadf = getData(catalog, startyear, endyear, write=True)
-        """
-        except FileNotFoundError:
+        catalog = args.catalog.lower()
+        startyear, endyear = map(int, [args.startyear, args.endyear])
+        download = args.forcedownload
+
+        dirname = '%s%s-%s' % (catalog, startyear, endyear) if catalog else\
+                  'all%s-%s' % (startyear, endyear)
+
+        if download:
             try:
                 os.makedirs(dirname)
             except OSError as exception:
                 if exception.errno != errno.EEXIST:
                     raise
             datadf = getData(catalog, startyear, endyear, write=True)
-        """
+        else:
+            # Python 2
+            try:
+                try:
+                    datadf = pd.read_csv('%s/%s.csv' % (dirname, dirname))
+                except IOError:
+                    try:
+                        os.makedirs(dirname)
+                    except OSError as exception:
+                        if exception.errno != errno.EEXIST:
+                            raise
+                    datadf = getData(catalog, startyear, endyear, write=True)
+            # Python 3
+            except:
+                try:
+                    datadf = pd.read_csv('%s/%s.csv' % (dirname, dirname))
+                except FileNotFoundError:
+                    try:
+                        os.makedirs(dirname)
+                    except OSError as exception:
+                        if exception.errno != errno.EEXIST:
+                            raise
+                    datadf = getData(catalog, startyear, endyear, write=True)
+
+    else:
+        from shutil import copy2
+        dirname = '.'.join(args.specifyfile.split('.')[:-1])
+
+        try:
+            os.makedirs(dirname)
+        except OSError as exception:
+            if exception.errno != errno.EEXIST:
+                raise
+
+        datadf = pd.read_csv(args.specifyfile)
+        copy2(args.specifyfile, dirname)
+
+    datadf = datadf.sort_values(by='time').reset_index(drop=True)
 
     os.chdir(dirname)
     basicCatSum(datadf, dirname)
