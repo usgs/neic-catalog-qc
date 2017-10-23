@@ -32,18 +32,22 @@ def retry(ExceptionToCheck, tries=4, delay=4, backoff=1.5, logger=None):
     return deco_retry
 
 
-def printstatus(status):
+class printstatus(object):
 
-    def deco_status(f):
+    def __init__(self, status):
+        self.status = status
 
-        def f_status(*args, **kwargs):
-
-            sys.stdout.write(status + '... ')
+    def __call__(self, f, *args, **kwargs):
+        
+        def new_func(*args, **kwargs):
+            sys.stdout.write(self.status + '... ')
             sys.stdout.flush()
-            f(*args, **kwargs)
+
+            func = f(*args, **kwargs)
+
             sys.stdout.write('Done.\n')
             sys.stdout.flush()
 
-        return f_status
+            return func
 
-    return deco_status
+        return new_func
