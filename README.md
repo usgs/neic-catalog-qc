@@ -10,4 +10,4 @@ Required Python packages
 1. [NumPy](http://www.numpy.org)
 2. [Matplotlib](https://matplotlib.org)
 3. [Pandas](http://pandas.pydata.org)
-4. [Basemap](https://matplotlib.org/basemap)
+4. [Cartopy](http://scitools.org.uk/cartopy)

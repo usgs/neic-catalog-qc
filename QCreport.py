@@ -6,12 +6,12 @@ import errno
 import argparse
 import numpy as np
 import pandas as pd
+import cartopy.crs as ccrs
 import matplotlib.pyplot as plt
 
 from math import sqrt, radians, cos
 from decorators import *
 from datetime import date, datetime
-from mpl_toolkits.basemap import Basemap
 from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.patches import Polygon
 
@@ -59,10 +59,20 @@ def getmapbounds(catalog):
     lllat, lllon = max(minlat-latdiff, -90), max(minlon-londiff, -180)
     urlat, urlon = min(maxlat+latdiff, 90), min(maxlon+londiff, 180)
 
+    if (lllon < 175) and (urlon > 175) \
+        and (len(catalog[catalog['longitude'].between(-100, 100)]) == 0):
+
+        lllon = catalog[catalog['longitude'] > 0].min()['longitude']
+        urlon = 360 + catalog[catalog['longitude'] < 0].max()['longitude']
+        clon = 180
+
+    else:
+        clon = 0
+
     gridsize = max(urlat-lllat, urlon-lllon) / 45.
     hgridsize, tgridsize = gridsize / 2., gridsize / 10.
 
-    return lllat, lllon, urlat, urlon, gridsize, hgridsize, tgridsize
+    return lllat, lllon, urlat, urlon, gridsize, hgridsize, tgridsize, clon
 
 
 # round number to nearest grid-square center
@@ -96,7 +106,7 @@ def grouplatlons(catalog, minmag=0):
         magmask = catalog['mag'] >= minmag
         groupedlatlons = catalog[magmask].groupby('center')
         groupedlatlons = groupedlatlons.count().sort_index()
-    elif catalog['Mag'].isnull().all() and (minmag != 0):
+    elif catalog['mag'].isnull().all() and (minmag != 0):
         groupedlatlons = catalog.groupby('center').count().sort_index()
         print("No magnitude data in catalog - plotting all events")
     else:
@@ -119,9 +129,9 @@ def range2rgb(rmin, rmax, numcolors):
 
 # draw rectangle with vertices given in degrees
 def draw_grid(lats, lons, m, col, alpha=1):
-    x, y = m(lons, lats)
-    xy = list(zip(x,y))
-    poly = Polygon(xy, facecolor=col, alpha=alpha, edgecolor='k', zorder=11)
+    xy = list(zip(lons, lats))
+    poly = Polygon(xy, facecolor=col, alpha=alpha, edgecolor='k', zorder=11,
+                   transform=ccrs.PlateCarree())
     plt.gca().add_patch(poly)
 
 
@@ -147,7 +157,7 @@ def WW2000(Mc, mags, binsize):
     R = np.zeros(len(Mc_vec))
 
     for ii in range(len(Mc_vec)):
-        M = mags[mags >= Mc_vec[ii]]
+        M = mags[mags >= Mc_vec[ii]-0.001]
         Mag_bins_edges = np.arange(Mc_vec[ii]-binsize/2., max_mag+binsize,
                                    binsize)
         Mag_bins_centers = np.arange(Mc_vec[ii], max_mag+binsize/2., binsize)
@@ -156,7 +166,7 @@ def WW2000(Mc, mags, binsize):
 
         for jj in range(len(cdf)):
             cdf[jj] = np.count_nonzero(~np.isnan(mags[
-                                       mags >= Mag_bins_centers[jj]]))
+                                       mags >= Mag_bins_centers[jj]-0.001]))
 
 
         bvalue[ii] = np.log10(np.exp(1))/(np.average(M) - (Mc_vec[ii]-Corr))
@@ -170,9 +180,9 @@ def WW2000(Mc, mags, binsize):
         S = abs(np.diff(L))
         R[ii] = (sum(abs(B[:-1] - S))/len(M))*100
 
-    ind = np.where(R <= 10)
+    ind = np.where(R <= 10)[0]
 
-    if not ind:
+    if len(ind) != 0:
         ii = ind[0]
     else:
         ii = list(R).index(min(R))
@@ -284,8 +294,7 @@ def getData(catalog, startyear, endyear, minmag=0.1, maxmag=10, system=0,
 
             yeardata.append(monthdata)
 
-            progressBar(barcount, bartotal, ('Downloading data from '
-                                             'earthquake.usgs.gov ...'))
+            progressBar(barcount, bartotal, 'Downloading data ...')
             barcount += 1
             month += 1
 
@@ -361,14 +370,12 @@ def mapDetecs(catalog, dirname, minmag=0, mindep=-50, title='', proj='cyl',
                       & (catalog['depth'] >= mindep)].copy()
 
     # define map bounds
-    lllat, lllon, urlat, urlon = getmapbounds(catalog)[0:4]
+    lllat, lllon, urlat, urlon, _, _, _, clon = getmapbounds(catalog)
 
     plt.figure(figsize=(12,7))
-    m = Basemap(projection=proj, llcrnrlat=lllat, urcrnrlat=urlat,
-                llcrnrlon=lllon, urcrnrlon=urlon, resolution=res)
-    m.drawmapboundary(fill_color='lightblue')
-    m.fillcontinents(color='wheat', lake_color='lightblue')
-    m.drawcoastlines()
+    m = plt.axes(projection=ccrs.PlateCarree(central_longitude=clon))
+    m.set_extent([lllon, urlon, lllat, urlat], ccrs.PlateCarree())
+    m.coastlines('50m')
 
     # if catalog has magnitude data
     if not catalog['mag'].isnull().all():
@@ -377,27 +384,27 @@ def mapDetecs(catalog, dirname, minmag=0, mindep=-50, title='', proj='cyl',
         binsizes = [10, 25, 50, 100, 400]
         bincolors = ['g', 'b', 'y', 'r', 'r']
         binmarks = ['o', 'o', 'o', 'o', '*']
-        catalog.loc[:,'maggroup'] = pd.cut(catalog['mag'], bins, 
+        catalog.loc[:, 'maggroup'] = pd.cut(catalog['mag'], bins, 
                                            labels=binnames)
 
         for i, label in enumerate(binnames):
             mgmask = catalog['maggroup'] == label
             rcat = catalog[mgmask]
             lons, lats = list(rcat['longitude']), list(rcat['latitude'])
-            x, y = m(lons, lats)
-            m.scatter(x, y, s=binsizes[i], marker=binmarks[i], c=bincolors[i],
-                      label=binnames[i], alpha=0.8, zorder=10)
+            if len(lons) > 0:
+                m.scatter(lons, lats, s=binsizes[i], marker=binmarks[i],
+                          c=bincolors[i], label=binnames[i], alpha=0.8,
+                          zorder=10, transform=ccrs.PlateCarree())
 
         plt.legend(loc='lower left')
 
     # if catalog does not have magnitude data
     else:
         lons, lats = list(catalog['longitude']), list(catalog['latitude'])
-        x, y = m(lons, lats)
-        m.scatter(x, y, s=marksize, marker=mark, c=color, zorder=10)
+        m.scatter(lons, lats, s=marksize, marker=mark, c=color, zorder=10)
 
     plt.title(title)
-    plt.subplots_adjust(left=0, right=1, top=0.95, bottom=0)
+    plt.subplots_adjust(left=0.05, right=0.95, top=0.95, bottom=0.05)
 
     plt.savefig('%s_mapdetecs.png' % dirname, dpi=300)
 
@@ -406,13 +413,13 @@ def mapDetecs(catalog, dirname, minmag=0, mindep=-50, title='', proj='cyl',
 # (rmax=510 is white, rmin=0 is black)
 @printstatus('Mapping earthquake density')
 def mapDetecNums(catalog, dirname, title='', proj='cyl', lon0=0, res='c',
-                 numcolors=20, rmin=77, rmax=490, minmag=0, pltevents=True):
+                 numcolors=16, rmin=77, rmax=490, minmag=0, pltevents=True):
 
     # generate bounds for map
     mask = catalog['mag'] >= minmag
 
-    lllat, lllon, urlat, urlon, gridsize, hgridsize = \
-        getmapbounds(catalog[mask])[0:6]
+    lllat, lllon, urlat, urlon, gridsize, hgridsize, _, clon = \
+        getmapbounds(catalog[mask])
 
     catalog = addcenters(catalog, gridsize)
     groupedlatlons, cmin, cmax = grouplatlons(catalog, minmag=minmag)
@@ -426,18 +433,16 @@ def mapDetecNums(catalog, dirname, title='', proj='cyl', lon0=0, res='c',
 
     # put each center into its corresponding color group
     colorgroups = list(np.linspace(0, cmax, numcolors))
-    groupedlatlons.loc[:,'group'] = np.digitize(groupedlatlons['count'], 
-                                                colorgroups)
+    groupedlatlons.loc[:, 'group'] = np.digitize(groupedlatlons['count'], 
+                                                 colorgroups)
 
     # create map
-    plt.figure(figsize=(12,6))
-    m = Basemap(projection=proj, llcrnrlat=lllat, urcrnrlat=urlat,
-                llcrnrlon=lllon, urcrnrlon=urlon, resolution=res)
-    m.drawmapboundary(fill_color='lightblue')
-    m.fillcontinents(color='wheat', lake_color='lightblue')
-    m.drawcoastlines()
+    plt.figure(figsize=(12,7))
+    m = plt.axes(projection=ccrs.PlateCarree(central_longitude=clon))
+    m.set_extent([lllon, urlon, lllat, urlat], ccrs.PlateCarree())
+    m.coastlines('50m')
     plt.title(title, fontsize=20)
-    plt.subplots_adjust(left=0.01, right=0.9, top=0.95, bottom=0.01)
+    plt.subplots_adjust(left=0.01, right=0.9, top=0.95, bottom=0.05)
 
     # create color map based on rmin and rmax
     cmap = LinearSegmentedColormap.from_list('CM', colors)._resample(numcolors)
@@ -449,7 +454,7 @@ def mapDetecNums(catalog, dirname, title='', proj='cyl', lon0=0, res='c',
 
     # format color bar
     cbticks = [x for x in np.linspace(0, cmax, numcolors+1)]
-    cbar = m.colorbar(colormesh, ticks=cbticks)
+    cbar = plt.colorbar(colormesh, ticks=cbticks)
     cbar.ax.set_yticklabels([('%.0f' % x) for x in cbticks])
     cbar.set_label('# of detections', rotation=270, labelpad=15)
 
@@ -648,14 +653,14 @@ def catMagComp(catalog, dirname, magbin=0.1):
     cdf = np.zeros(len(mag_centers))
 
     for ii in range(len(cdf)):
-        cdf[ii] = np.count_nonzero(~np.isnan(mags[mags >= mag_centers[ii]]))
+        cdf[ii] = np.count_nonzero(~np.isnan(mags[mags
+                                                >= mag_centers[ii]-0.001]))
 
     mag_edges = np.arange(minmag - magbin/2., maxmag+magbin, magbin)
     g_r, _ = np.histogram(mags, mag_edges)
     ii = list(g_r).index(max(g_r))
 
     Mc_est = mag_centers[ii]
-    #Mc_est = 5.2
 
     try:
         Mc_est, bvalue, avalue, L, Mc_bins, std_dev = WW2000(Mc_est, mags,
@@ -669,7 +674,6 @@ def catMagComp(catalog, dirname, magbin=0.1):
         log_L = avalue-bvalue*Mc_bins
         L = 10.**log_L
         std_dev = bvalue/sqrt(len(mags[mags >= Mc_est]))
-
 
     maxincremcomp = mag_centers[ii]
     pm = u'\u00B1'
@@ -881,6 +885,7 @@ def main():
         copy2(args.specifyfile, dirname)
 
     datadf = datadf.sort_values(by='time').reset_index(drop=True)
+    datadf.loc[:, 'ms'] = datadf['time'].str[-4:-1].astype('float')
 
     os.chdir(dirname)
     basicCatSum(datadf, dirname)
@@ -891,6 +896,8 @@ def main():
     makeHist(datadf, 'mag', 0.1, dirname, xlabel='Magnitude')
     plt.close()
     makeHist(datadf, 'depth', 10, dirname, xlabel='Depth (km)')
+    plt.close()
+    makeHist(datadf, 'ms', 20, dirname, xlabel='Milliseconds')
     plt.close()
     makeTimeHist(datadf, 'hour', dirname)
     plt.close()
@@ -914,4 +921,3 @@ if __name__ == '__main__':
     except (KeyboardInterrupt, SystemError):
         sys.stdout.write('\nProgram canceled. Exiting...\n')
         sys.exit()
-
