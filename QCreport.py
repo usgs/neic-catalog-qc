@@ -1,19 +1,21 @@
 #!/usr/bin/env python
+"""Script for generating figures of catalog statistics. Run `QCreport.py -h`
+for command line usage.
+"""
 import os
-import io
 import sys
 import errno
 import argparse
+from datetime import date, datetime
+from math import sqrt, radians, cos
+
 import numpy as np
 import pandas as pd
 import cartopy.crs as ccrs
 import matplotlib.pyplot as plt
-
-from math import sqrt, radians, cos
-from decorators import *
-from datetime import date, datetime
 from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.patches import Polygon
+from decorators import retry, printstatus
 
 # Python 2
 try:
@@ -23,36 +25,37 @@ except ImportError:
     from urllib.request import urlopen, HTTPError
 
 
-################################################################################
-############################## Auxiliary Functions #############################
-################################################################################
+###############################################################################
+############################## Auxiliary Functions ############################
+###############################################################################
 
 
-# Show progress bar for whatever task
-def progressBar(count, total, status=''):
+def progress_bar(count, total, status=''):
+    """Show progress bar for whatever task."""
     barlen = 50
     filledlen = int(round(barlen * count / float(total)))
 
     percents = round(100. * count / float(total), 1)
-    bar = '#' * filledlen + '-' * (barlen-filledlen)
+    pbar = '#' * filledlen + '-' * (barlen-filledlen)
 
     if percents < 100.0:
-        sys.stdout.write('[%s] %s%s  %s\r' % (bar, percents, '%', status))
+        sys.stdout.write('[%s] %s%s  %s\r' % (pbar, percents, '%', status))
         sys.stdout.flush()
     else:
-        sys.stdout.write('[%s] %s%s %s\n' % (bar, percents, '%',
-                         'Done downloading data' + ' '*(len(status)-21)))
+        sys.stdout.write('[%s] %s%s %s\n' % (pbar, percents, '%',
+                                             'Done downloading data' +
+                                             ' '*(len(status)-21)))
         sys.stdout.flush()
 
 
-# Return list of lines in url; if HTTPError, repeat
 @retry(HTTPError, tries=5, delay=0.5, backoff=1)
-def accessURL(url):
+def access_url(url):
+    """Return list of lines in url; if HTTPError, repeat."""
     return [line.rstrip() for line in urlopen(url).readlines()]
 
 
-# generate map bounds and gridsize
-def getmapbounds(catalog):
+def get_map_bounds(catalog):
+    """Generate map bounds and gridsize."""
     minlat, maxlat = catalog['latitude'].min(), catalog['latitude'].max()
     minlon, maxlon = catalog['longitude'].min(), catalog['longitude'].max()
     latdiff, londiff = (maxlat-minlat) / 5., (maxlon-minlon) / 5.
@@ -60,7 +63,7 @@ def getmapbounds(catalog):
     urlat, urlon = min(maxlat+latdiff, 90), min(maxlon+londiff, 180)
 
     if (lllon < 175) and (urlon > 175) \
-        and (len(catalog[catalog['longitude'].between(-100, 100)]) == 0):
+            and (len(catalog[catalog['longitude'].between(-100, 100)]) == 0):
 
         lllon = catalog[catalog['longitude'] > 0].min()['longitude']
         urlon = 360 + catalog[catalog['longitude'] < 0].max()['longitude']
@@ -75,33 +78,34 @@ def getmapbounds(catalog):
     return lllat, lllon, urlat, urlon, gridsize, hgridsize, tgridsize, clon
 
 
-# round number to nearest grid-square center
 def round2center(num, gridsize):
+    """Round number to nearest grid-square center."""
     hgridsize = gridsize / 2
 
-    return num - (num%gridsize) + hgridsize
+    return num - (num % gridsize) + hgridsize
 
 
-# round number to nearest timezone longitude
 def round2lon(num):
+    """Round number to nearest timezone longitude."""
     return 15 * round(num / 15.)
 
 
-# add corresponding centers to catalog
-def addcenters(catalog, gridsize):
+def add_centers(catalog, gridsize):
+    """Add corresponding centers to catalog."""
     zippedlatlon = list(zip(round2center(catalog['latitude'], gridsize),
                             round2center(catalog['longitude'], gridsize)))
     catalog = catalog.reset_index()
-    catalog.loc[:,'center'] = pd.Series(zippedlatlon)
+    catalog.loc[:, 'center'] = pd.Series(zippedlatlon)
     catalog = catalog.set_index('index')
     catalog.index.names = ['']
 
     return catalog
 
 
-# group detections by nearest grid-square center, and return min/max of counts
-def grouplatlons(catalog, minmag=0):
-
+def group_lat_lons(catalog, minmag=0):
+    """Group detections by nearest grid-square center, and return min/max
+    of counts.
+    """
     if not catalog['mag'].isnull().all():
         magmask = catalog['mag'] >= minmag
         groupedlatlons = catalog[magmask].groupby('center')
@@ -119,87 +123,87 @@ def grouplatlons(catalog, minmag=0):
     return groupedlatlons, cmin, cmax
 
 
-# create a list of red RGB values using colmin and colmax with numcolors colors
 def range2rgb(rmin, rmax, numcolors):
+    """Create a list of red RGB values using colmin and colmax with numcolors
+    number of colors.
+    """
     colors = np.linspace(rmax/255., rmin/255., numcolors)
     colors = [(min(1, x), max(0, x-1), max(0, x-1)) for x in colors]
 
     return colors
 
 
-# draw rectangle with vertices given in degrees
-def draw_grid(lats, lons, m, col, alpha=1):
-    xy = list(zip(lons, lats))
-    poly = Polygon(xy, facecolor=col, alpha=alpha, edgecolor='k', zorder=11,
-                   transform=ccrs.PlateCarree())
+def draw_grid(lats, lons, col, alpha=1):
+    """Draw rectangle with vertices given in degrees."""
+    latlons = list(zip(lons, lats))
+    poly = Polygon(latlons, facecolor=col, alpha=alpha, edgecolor='k',
+                   zorder=11, transform=ccrs.PlateCarree())
     plt.gca().add_patch(poly)
 
 
-# round number to nearest histogram bin edge (either "up" or "down")
 def round2bin(number, binsize, direction):
+    """Round number to nearest histogram bin edge (either "up" or "down")."""
     if direction == 'down':
-        return number - (number%binsize)
+        return number - (number % binsize)
     if direction == 'up':
-        return number - (number%binsize) + binsize
+        return number - (number % binsize) + binsize
 
 
-# Wiemer and Wyss (2000) method for determing a and b values
-def WW2000(Mc, mags, binsize):
-
+def WW2000(mcval, mags, binsize):
+    """Wiemer and Wyss (2000) method for determining a and b values."""
     mags = mags[~np.isnan(mags)]
     mags = np.around(mags, 1)
-    Mc_vec = np.arange(Mc-1.5, Mc+1.5+binsize/2., binsize)
+    mc_vec = np.arange(mcval-1.5, mcval+1.5+binsize/2., binsize)
     max_mag = max(mags)
-    Corr = binsize / 2.
-    bvalue = np.zeros(len(Mc_vec))
-    std_dev = np.zeros(len(Mc_vec))
-    avalue = np.zeros(len(Mc_vec))
-    R = np.zeros(len(Mc_vec))
+    corr = binsize / 2.
+    bvalue = np.zeros(len(mc_vec))
+    std_dev = np.zeros(len(mc_vec))
+    avalue = np.zeros(len(mc_vec))
+    rval = np.zeros(len(mc_vec))
 
-    for ii in range(len(Mc_vec)):
-        M = mags[mags >= Mc_vec[ii]-0.001]
-        Mag_bins_edges = np.arange(Mc_vec[ii]-binsize/2., max_mag+binsize,
+    for idx in range(len(mc_vec)):
+        mval = mags[mags >= mc_vec[idx]-0.001]
+        mag_bins_edges = np.arange(mc_vec[idx]-binsize/2., max_mag+binsize,
                                    binsize)
-        Mag_bins_centers = np.arange(Mc_vec[ii], max_mag+binsize/2., binsize)
+        mag_bins_centers = np.arange(mc_vec[idx], max_mag+binsize/2., binsize)
 
-        cdf = np.zeros(len(Mag_bins_centers))
+        cdf = np.zeros(len(mag_bins_centers))
 
-        for jj in range(len(cdf)):
-            cdf[jj] = np.count_nonzero(~np.isnan(mags[
-                                       mags >= Mag_bins_centers[jj]-0.001]))
+        for jdx in range(len(cdf)):
+            cdf[jdx] = np.count_nonzero(~np.isnan(mags[
+                mags >= mag_bins_centers[jdx]-0.001]))
 
+        bvalue[idx] = np.log10(np.exp(1))/(np.average(mval)
+                                           - (mc_vec[idx]-corr))
+        std_dev[idx] = bvalue[idx]/sqrt(cdf[0])
 
-        bvalue[ii] = np.log10(np.exp(1))/(np.average(M) - (Mc_vec[ii]-Corr))
-        std_dev[ii] = bvalue[ii]/sqrt(cdf[0])
+        avalue[idx] = np.log10(len(mval)) + bvalue[idx]*mc_vec[idx]
+        log_l = avalue[idx] - bvalue[idx]*mag_bins_centers
+        lval = 10.**log_l
 
-        avalue[ii] = np.log10(len(M)) + bvalue[ii]*Mc_vec[ii]
-        log_L = avalue[ii] - bvalue[ii]*Mag_bins_centers
-        L = 10.**log_L
+        bval, _ = np.histogram(mval, mag_bins_edges)
+        sval = abs(np.diff(lval))
+        rval[idx] = (sum(abs(bval[:-1] - sval))/len(mval))*100
 
-        B, _ = np.histogram(M, Mag_bins_edges)
-        S = abs(np.diff(L))
-        R[ii] = (sum(abs(B[:-1] - S))/len(M))*100
-
-    ind = np.where(R <= 10)[0]
+    ind = np.where(rval <= 10)[0]
 
     if len(ind) != 0:
-        ii = ind[0]
+        idx = ind[0]
     else:
-        ii = list(R).index(min(R))
+        idx = list(rval).index(min(rval))
 
-    Mc = Mc_vec[ii]
-    bvalue = bvalue[ii]
-    avalue = avalue[ii]
-    std_dev = std_dev[ii]
-    Mag_bins = np.arange(0, max_mag+binsize/2., binsize)
-    L = 10.**(avalue-bvalue*Mag_bins)
+    mcval = mc_vec[idx]
+    bvalue = bvalue[idx]
+    avalue = avalue[idx]
+    std_dev = std_dev[idx]
+    mag_bins = np.arange(0, max_mag+binsize/2., binsize)
+    lval = 10.**(avalue-bvalue*mag_bins)
 
-    return Mc, bvalue, avalue, L, Mag_bins, std_dev
+    return mcval, bvalue, avalue, lval, mag_bins, std_dev
 
 
-# convert from ComCat time format to Unix/epoch time
-def toEpoch(ogtime):
-
+def to_epoch(ogtime):
+    """Convert from ComCat time format to Unix/epoch time."""
     fstr = '%Y-%m-%dT%H:%M:%S.%fZ'
     epoch = datetime(1970, 1, 1)
     epochtime = (datetime.strptime(ogtime, fstr) - epoch).total_seconds()
@@ -207,50 +211,51 @@ def toEpoch(ogtime):
     return epochtime
 
 
-# calculate equirectangular distance between two points
-def eqdist(lat1, lon1, lat2, lon2):
+def eq_dist(lat1, lon1, lat2, lon2):
+    """Calculate equirectangular distance between two points."""
     lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
-    x = (lon2 - lon1) * cos(0.5 * (lat2+lat1))
-    y = lat2 - lat1
-    eqd = 6371 * sqrt(x*x + y*y)
+    xval = (lon2 - lon1) * cos(0.5 * (lat2+lat1))
+    yval = lat2 - lat1
+    eqd = 6371 * sqrt(xval*xval + yval*yval)
 
     return eqd
 
 
-################################################################################
-################################# Main Functions ###############################
-################################################################################
+###############################################################################
+################################# Main Functions ##############################
+###############################################################################
 
 
-# download catalog data from earthquake.usgs.gov
-def getData(catalog, startyear, endyear, minmag=0.1, maxmag=10, system=0,
-            write=False):
-
+def get_data(catalog, startyear, endyear, minmag=0.1, maxmag=10, system=0,
+             write=False):
+    """Download catalog data from earthquake.usgs.gov"""
     systems = ['prod01', 'prod02', 'dev', 'dev01', 'dev02']
-    SY = systems[system]
+    syval = systems[system]
     catalog = catalog.lower()
     year = startyear
     alldata = []
     catname = catalog if catalog else 'all'
+    if catname == 'all':
+        catalog = ''
     dirname = '%s%s-%s' % (catname, startyear, endyear)
     fname = '%s.csv' % dirname
     bartotal = 12 * (endyear - startyear + 1)
     barcount = 1
 
-    while (year <= endyear):
-        
+    while year <= endyear:
+
         month = 1
         yeardata = []
 
-        while (month <= 12):
+        while month <= 12:
 
             if month in [4, 6, 9, 11]:
                 endday = 30
 
             elif month == 2:
-                checkLY = (year % 4)
+                checkly = (year % 4)
 
-                if (checkLY == 0):
+                if checkly == 0:
                     endday = 29
                 else:
                     endday = 28
@@ -261,40 +266,41 @@ def getData(catalog, startyear, endyear, minmag=0.1, maxmag=10, system=0,
             endd = '-'.join([str(year), str(month), str(endday)])
 
             if not catalog:
-                if (system == 0):
+                if system == 0:
                     url = ('https://earthquake.usgs.gov/fdsnws/event/1/query'
                            '.csv?starttime=' + startd + '-1%2000:00:00'
                            '&endtime=' + endd + '%2023:59:59&orderby=time-asc'
-                           '&minmagnitude=' + str(minmag) + '&maxmagnitude='
-                           + str(maxmag))
+                           '&minmagnitude=' + str(minmag) + '&maxmagnitude=' +
+                           str(maxmag))
                 else:
-                    url = ('https://' + SY + '-earthquake.cr.usgs.gov/fdsnws/'
-                           'event/1/query.csv?starttime=' + startd + '-1%2000:'
-                           '00:00&endtime=' + endd + '%2023:59:59&orderby='
-                           'time-asc&minmagnitude=' + str(minmag) +
+                    url = ('https://' + syval + '-earthquake.cr.usgs.gov/'
+                           'fdsnws/event/1/query.csv?starttime=' + startd +
+                           '-1%2000:00:00&endtime=' + endd + '%2023:59:59'
+                           '&orderby=time-asc&minmagnitude=' + str(minmag) +
                            '&maxmagnitude=' + str(maxmag))
             else:
-                if (system == 0):
+                if system == 0:
                     url = ('https://earthquake.usgs.gov/fdsnws/event/1/query'
                            '.csv?starttime=' + startd + '-1%2000:00:00'
                            '&endtime=' + endd + '%2023:59:59&orderby=time-asc'
                            '&catalog=' + catalog + '&minmagnitude=' +
                            str(minmag) + '&maxmagnitude=' + str(maxmag))
                 else:
-                    url = ('https://' + SY + '-earthquake.cr.usgs.gov/fdsnws/'
-                           'event/1/query.csv?starttime=' + startd + '-1%2000:'
-                           '00:00&endtime=' + endd + '%2023:59:59&orderby='
-                           '&catalog=' + catalog + 'time-asc&minmagnitude=' +
-                           str(minmag) + '&maxmagnitude=' + str(maxmag))
+                    url = ('https://' + syval + '-earthquake.cr.usgs.gov/'
+                           'fdsnws/event/1/query.csv?starttime=' + startd +
+                           '-1%2000:00:00&endtime=' + endd + '%2023:59:59'
+                           '&orderby=&catalog=' + catalog + 'time-asc'
+                           '&minmagnitude=' + str(minmag) + '&maxmagnitude=' +
+                           str(maxmag))
 
-            monthdata = accessURL(url)
+            monthdata = access_url(url)
 
             if (month != 1) or (year != startyear):
                 del monthdata[0]
 
             yeardata.append(monthdata)
 
-            progressBar(barcount, bartotal, 'Downloading data ...')
+            progress_bar(barcount, bartotal, 'Downloading data ...')
             barcount += 1
             month += 1
 
@@ -304,7 +310,7 @@ def getData(catalog, startyear, endyear, minmag=0.1, maxmag=10, system=0,
 
     alldata = [item for sublist in alldata for item in sublist]
     alldata = [item for sublist in alldata for item in sublist]
-    
+
     if write:
         with open('%s/%s' % (dirname, fname), 'w') as openfile:
             for event in alldata:
@@ -317,17 +323,12 @@ def getData(catalog, startyear, endyear, minmag=0.1, maxmag=10, system=0,
         alldatadf = pd.read_csv('getDataTEMP.csv')
         os.remove('getDataTEMP.csv')
 
-    if len(alldatadf) != 1:
-        return alldatadf
-    else:
-        print('Catalog has no data available for that time period. Quitting...')
-        sys.exit()
+    return alldatadf
 
 
-# gather basic catalog summary statistics
 @printstatus('Creating basic catalog summary')
-def basicCatSum(catalog, dirname):
-
+def basic_cat_sum(catalog, dirname):
+    """Gather basic catalog summary statistics."""
     lines = []
 
     lines.append('Catalog name: %s\n\n' % dirname[:-9].upper())
@@ -361,21 +362,19 @@ def basicCatSum(catalog, dirname):
             sumfile.write(line)
 
 
-# make scatter plot of detections with magnitudes (if applicable)
 @printstatus('Mapping earthquake locations')
-def mapDetecs(catalog, dirname, minmag=0, mindep=-50, title='', proj='cyl',
-              color='r', res='c', mark='x', marksize=15):
-
+def map_detecs(catalog, dirname, minmag=0, mindep=-50, title=''):
+    """Make scatter plot of detections with magnitudes (if applicable)."""
     catalog = catalog[(catalog['mag'] >= minmag)
                       & (catalog['depth'] >= mindep)].copy()
 
     # define map bounds
-    lllat, lllon, urlat, urlon, _, _, _, clon = getmapbounds(catalog)
+    lllat, lllon, urlat, urlon, _, _, _, clon = get_map_bounds(catalog)
 
-    plt.figure(figsize=(12,7))
-    m = plt.axes(projection=ccrs.PlateCarree(central_longitude=clon))
-    m.set_extent([lllon, urlon, lllat, urlat], ccrs.PlateCarree())
-    m.coastlines('50m')
+    plt.figure(figsize=(12, 7))
+    mplmap = plt.axes(projection=ccrs.PlateCarree(central_longitude=clon))
+    mplmap.set_extent([lllon, urlon, lllat, urlat], ccrs.PlateCarree())
+    mplmap.coastlines('50m')
 
     # if catalog has magnitude data
     if not catalog['mag'].isnull().all():
@@ -384,24 +383,24 @@ def mapDetecs(catalog, dirname, minmag=0, mindep=-50, title='', proj='cyl',
         binsizes = [10, 25, 50, 100, 400]
         bincolors = ['g', 'b', 'y', 'r', 'r']
         binmarks = ['o', 'o', 'o', 'o', '*']
-        catalog.loc[:, 'maggroup'] = pd.cut(catalog['mag'], bins, 
-                                           labels=binnames)
+        catalog.loc[:, 'maggroup'] = pd.cut(catalog['mag'], bins,
+                                            labels=binnames)
 
         for i, label in enumerate(binnames):
             mgmask = catalog['maggroup'] == label
             rcat = catalog[mgmask]
             lons, lats = list(rcat['longitude']), list(rcat['latitude'])
             if len(lons) > 0:
-                m.scatter(lons, lats, s=binsizes[i], marker=binmarks[i],
-                          c=bincolors[i], label=binnames[i], alpha=0.8,
-                          zorder=10, transform=ccrs.PlateCarree())
+                mplmap.scatter(lons, lats, s=binsizes[i], marker=binmarks[i],
+                               c=bincolors[i], label=binnames[i], alpha=0.8,
+                               zorder=10, transform=ccrs.PlateCarree())
 
         plt.legend(loc='lower left')
 
     # if catalog does not have magnitude data
     else:
         lons, lats = list(catalog['longitude']), list(catalog['latitude'])
-        m.scatter(lons, lats, s=marksize, marker=mark, c=color, zorder=10)
+        mplmap.scatter(lons, lats, s=15, marker='x', c='r', zorder=10)
 
     plt.title(title)
     plt.subplots_adjust(left=0.05, right=0.95, top=0.95, bottom=0.05)
@@ -409,20 +408,20 @@ def mapDetecs(catalog, dirname, minmag=0, mindep=-50, title='', proj='cyl',
     plt.savefig('%s_mapdetecs.png' % dirname, dpi=300)
 
 
-# map detections and a grid of detection density 
-# (rmax=510 is white, rmin=0 is black)
 @printstatus('Mapping earthquake density')
-def mapDetecNums(catalog, dirname, title='', proj='cyl', lon0=0, res='c',
-                 numcolors=16, rmin=77, rmax=490, minmag=0, pltevents=True):
-
+def map_detec_nums(catalog, dirname, title='', numcolors=16, rmin=77, rmax=490,
+                   minmag=0, pltevents=True):
+    """Map detections and a grid of detection density. rmax=510 is white,
+    rmin=0 is black.
+    """
     # generate bounds for map
     mask = catalog['mag'] >= minmag
 
     lllat, lllon, urlat, urlon, gridsize, hgridsize, _, clon = \
-        getmapbounds(catalog[mask])
+        get_map_bounds(catalog[mask])
 
-    catalog = addcenters(catalog, gridsize)
-    groupedlatlons, cmin, cmax = grouplatlons(catalog, minmag=minmag)
+    catalog = add_centers(catalog, gridsize)
+    groupedlatlons, _, cmax = group_lat_lons(catalog, minmag=minmag)
 
     # print message if there are no detections with magnitudes above minmag
     if cmax == 0:
@@ -433,14 +432,14 @@ def mapDetecNums(catalog, dirname, title='', proj='cyl', lon0=0, res='c',
 
     # put each center into its corresponding color group
     colorgroups = list(np.linspace(0, cmax, numcolors))
-    groupedlatlons.loc[:, 'group'] = np.digitize(groupedlatlons['count'], 
+    groupedlatlons.loc[:, 'group'] = np.digitize(groupedlatlons['count'],
                                                  colorgroups)
 
     # create map
-    plt.figure(figsize=(12,7))
-    m = plt.axes(projection=ccrs.PlateCarree(central_longitude=clon))
-    m.set_extent([lllon, urlon, lllat, urlat], ccrs.PlateCarree())
-    m.coastlines('50m')
+    plt.figure(figsize=(12, 7))
+    mplmap = plt.axes(projection=ccrs.PlateCarree(central_longitude=clon))
+    mplmap.set_extent([lllon, urlon, lllat, urlat], ccrs.PlateCarree())
+    mplmap.coastlines('50m')
     plt.title(title, fontsize=20)
     plt.subplots_adjust(left=0.01, right=0.9, top=0.95, bottom=0.05)
 
@@ -448,9 +447,8 @@ def mapDetecNums(catalog, dirname, title='', proj='cyl', lon0=0, res='c',
     cmap = LinearSegmentedColormap.from_list('CM', colors)._resample(numcolors)
 
     # make dummy plot for setting color bar
-    xx, yy = list(catalog['longitude']), list(catalog['latitude'])
-    colormesh = m.pcolormesh(colors, colors, colors, cmap=cmap, alpha=1,
-                             vmin=0, vmax=cmax)
+    colormesh = mplmap.pcolormesh(colors, colors, colors, cmap=cmap, alpha=1,
+                                  vmin=0, vmax=cmax)
 
     # format color bar
     cbticks = [x for x in np.linspace(0, cmax, numcolors+1)]
@@ -459,7 +457,7 @@ def mapDetecNums(catalog, dirname, title='', proj='cyl', lon0=0, res='c',
     cbar.set_label('# of detections', rotation=270, labelpad=15)
 
     # plot rectangles with color corresponding to number of detections
-    for center, count, cgroup in groupedlatlons.itertuples():
+    for center, _, cgroup in groupedlatlons.itertuples():
         minlat, maxlat = center[0]-hgridsize, center[0]+hgridsize
         minlon, maxlon = center[1]-hgridsize, center[1]+hgridsize
         glats = [minlat, maxlat, maxlat, minlat]
@@ -467,27 +465,26 @@ def mapDetecNums(catalog, dirname, title='', proj='cyl', lon0=0, res='c',
 
         color = colors[cgroup-1]
 
-        draw_grid(glats, glons, m, col=color, alpha=0.8)
+        draw_grid(glats, glons, color, alpha=0.8)
 
     # if provided, plot detection epicenters
     if pltevents and not catalog['mag'].isnull().all():
         magmask = catalog['mag'] >= minmag
-        x = list(catalog['longitude'][magmask])
-        y = list(catalog['latitude'][magmask])
-        m.scatter(x, y, c='k', s=7, marker='x', zorder=5)
+        lons = list(catalog['longitude'][magmask])
+        lats = list(catalog['latitude'][magmask])
+        mplmap.scatter(lons, lats, c='k', s=7, marker='x', zorder=5)
     elif catalog['mag'].isnull().all():
-        x = list(catalog['longitude'])
-        y = list(catalog['latitude'])
-        m.scatter(x, y, c='k', s=7, marker='x', zorder=5)
+        lons = list(catalog['longitude'])
+        lats = list(catalog['latitude'])
+        mplmap.scatter(lons, lats, c='k', s=7, marker='x', zorder=5)
 
     plt.savefig('%s_eqdensity.png' % dirname, dpi=300)
 
 
-# plot histogram grouped by some parameter
 @printstatus('Making histogram of given parameter')
-def makeHist(catalog, param, binsize, dirname, color='b', title='', xlabel='', 
-             ylabel='Count', countlabel=False):
-
+def make_hist(catalog, param, binsize, dirname, title='', xlabel='',
+              countlabel=False):
+    """Plot histogram grouped by some parameter."""
     paramlist = catalog[pd.notnull(catalog[param])][param].tolist()
     minparam, maxparam = min(paramlist), max(paramlist)
     paramdown = round2bin(minparam, binsize, 'down')
@@ -497,23 +494,23 @@ def makeHist(catalog, param, binsize, dirname, color='b', title='', xlabel='',
 
     diffs = [abs(paramlist[i+1]-paramlist[i]) for i in range(len(paramlist))
              if i+1 < len(paramlist)]
-    diffs = [round(x, 1) for x in diffs if x>0]
+    diffs = [round(x, 1) for x in diffs if x > 0]
 
-    plt.figure(figsize=(10,6))
+    plt.figure(figsize=(10, 6))
     plt.title(title)
     plt.xlabel(xlabel, fontsize=14)
-    plt.ylabel(ylabel, fontsize=14)
+    plt.ylabel('Count', fontsize=14)
 
-    if min(diffs) == binsize:
+    if param == 'ms':
+        parambins = np.linspace(paramdown, paramup, numbins+1)
+        plt.xlim(paramdown, paramup)
+    else:
         parambins = np.linspace(paramdown, paramup+binsize,
                                 numbins+2) - binsize/2.
         plt.xlim(paramdown+binsize/2., paramup+binsize/2.)
-    else:
-        parambins = np.linspace(paramdown, paramup, numbins+1)
-        plt.xlim(paramdown, paramup)
 
-    h = plt.hist(paramlist, parambins, alpha=0.7, color=color, edgecolor='k')
-    maxbarheight = max([h[0][x] for x in range(numbins)] or [0])
+    phist = plt.hist(paramlist, parambins, alpha=0.7, color='b', edgecolor='k')
+    maxbarheight = max([phist[0][x] for x in range(numbins)] or [0])
     labely = maxbarheight / 50.
 
     plt.subplots_adjust(left=0.1, right=0.95, top=0.95, bottom=0.11)
@@ -523,25 +520,22 @@ def makeHist(catalog, param, binsize, dirname, color='b', title='', xlabel='',
     # put count numbers above the bars if countlabel=True
     if countlabel:
         for i in range(numbins):
-            plt.text(h[1][i]+labelbuff, h[0][i]+labely, '%0.f' % h[0][i], 
-                     size=12, ha='center')
+            plt.text(phist[1][i]+labelbuff, phist[0][i]+labely,
+                     '%0.f' % phist[0][i], size=12, ha='center')
 
     plt.savefig('%s_%shistogram.png' % (dirname, param), dpi=300)
 
 
-# make histogram either by hour of the day or by date
 @printstatus('Making histogram of given time duration')
-def makeTimeHist(catalog, timelength, dirname, title='', xlabel='',
-                 ylabel='Count'):
-
+def make_time_hist(catalog, timelength, dirname, title=''):
+    """Make histogram either by hour of the day or by date."""
     timelist = catalog['time']
-    mintime, maxtime = timelist.min(), timelist.max()
 
     plt.figure(figsize=(10, 6))
     plt.title(title)
-    plt.ylabel(ylabel, fontsize=14)
+    plt.ylabel('Count', fontsize=14)
 
-    if (timelength == 'hour'):
+    if timelength == 'hour':
         lons = np.linspace(-180, 180, 25).tolist()
         hours = np.linspace(-12, 12, 25).tolist()
 
@@ -553,7 +547,7 @@ def makeTimeHist(catalog, timelength, dirname, title='', xlabel='',
         tlonlist.loc[:, 'rhour'] = [x.hour + hours[lons.index(x.rLon)]
                                     for x in tlonlist.itertuples()]
 
-        tlonlist.loc[:, 'rhour'] = [x+24 if x<0 else x-24 if x>23 else x
+        tlonlist.loc[:, 'rhour'] = [x+24 if x < 0 else x-24 if x > 23 else x
                                     for x in tlonlist['rhour']]
 
         hourlist = tlonlist.rhour.tolist()
@@ -563,7 +557,7 @@ def makeTimeHist(catalog, timelength, dirname, title='', xlabel='',
         plt.xlabel('Hour of the Day', fontsize=14)
         plt.xlim(-0.5, 23.5)
 
-    elif (timelength == 'day'):
+    elif timelength == 'day':
         eqdates, counts = [], []
         daylist = [x.split('T')[0] for x in timelist]
         daydf = pd.DataFrame({'date': daylist})
@@ -588,10 +582,9 @@ def makeTimeHist(catalog, timelength, dirname, title='', xlabel='',
     plt.savefig('%s_%shistogram.png' % (dirname, timelength), dpi=300)
 
 
-# make bar graph of mean time separation between events by date
 @printstatus('Graphing mean time separation')
-def graphTimeSep(catalog, dirname):
-
+def graph_time_sep(catalog, dirname):
+    """Make bar graph of mean time separation between events by date."""
     catalog['convtime'] = [' '.join(x.split('T')).split('.')[0]
                            for x in catalog['time'].tolist()]
     catalog['convtime'] = catalog['convtime'].astype('datetime64[ns]')
@@ -601,33 +594,33 @@ def graphTimeSep(catalog, dirname):
     mindate = catalog['convtime'].min() - pd.Timedelta(days=15)
     maxdate = catalog['convtime'].max() - pd.Timedelta(days=15)
 
-    fig = plt.figure(figsize=(10,6))
-    ax = fig.add_subplot(111)
-    ax.set_ylabel('Time separation (min)')
-    ax.spines['top'].set_color('none')
-    ax.spines['bottom'].set_color('none')
-    ax.spines['left'].set_color('none')
-    ax.spines['right'].set_color('none')
-    ax.tick_params(labelcolor='w', top='off', bottom='off',
-                   left='off', right='off')
+    fig = plt.figure(figsize=(10, 6))
+    axfull = fig.add_subplot(111)
+    axfull.set_ylabel('Time separation (min)')
+    axfull.spines['top'].set_color('none')
+    axfull.spines['bottom'].set_color('none')
+    axfull.spines['left'].set_color('none')
+    axfull.spines['right'].set_color('none')
+    axfull.tick_params(labelcolor='w', top='off', bottom='off',
+                       left='off', right='off')
 
-    ax1 = fig.add_subplot(311)
+    fig.add_subplot(311)
     plt.plot(catalog['convtime'], catalog['dtmin'], alpha=1, color='b')
     plt.xlabel('Date')
     plt.title('Time separation between events')
     plt.xlim(mindate+pd.Timedelta(days=15), maxdate)
     plt.ylim(0)
 
-    ax2 = fig.add_subplot(312)
+    fig.add_subplot(312)
     month_max = catalog.resample('1M', on='convtime').max()['dtmin']
     months = month_max.index.map(lambda x: x.strftime('%Y-%m')).tolist()
-    months = [date(int(x[:4]), int(x[-2:]), 1)  for x in months]
+    months = [date(int(x[:4]), int(x[-2:]), 1) for x in months]
     plt.bar(months, month_max.tolist(), color='b', alpha=1, width=31)
     plt.xlabel('Month')
     plt.title('Maximum event separation by month')
     plt.xlim(mindate, maxdate)
 
-    ax3 = fig.add_subplot(313)
+    fig.add_subplot(313)
     month_med = catalog.resample('1M', on='convtime').median()['dtmin']
     plt.bar(months, month_med.tolist(), color='b', alpha=1, width=31)
     plt.xlabel('Month')
@@ -638,12 +631,10 @@ def graphTimeSep(catalog, dirname):
     plt.savefig('%s_timeseparation.png' % dirname, dpi=300)
 
 
-# plot catalog magnitude completeness (NEEDS FIXING; Mc_est VALUES WRONG)
 @printstatus('Graphing magnitude completeness')
-def catMagComp(catalog, dirname, magbin=0.1):
-
+def cat_mag_comp(catalog, dirname, magbin=0.1):
+    """Plot catalog magnitude completeness."""
     catalog = catalog[pd.notnull(catalog['mag'])]
-    EQEvents = catalog[catalog['type'] == 'earthquake']
     mags = np.array(catalog[catalog['mag'] > 0]['mag'])
     mags = np.around(mags, 1)
 
@@ -652,45 +643,42 @@ def catMagComp(catalog, dirname, magbin=0.1):
     mag_centers = np.arange(minmag, maxmag + 2*magbin, magbin)
     cdf = np.zeros(len(mag_centers))
 
-    for ii in range(len(cdf)):
-        cdf[ii] = np.count_nonzero(~np.isnan(mags[mags
-                                                >= mag_centers[ii]-0.001]))
+    for idx in range(len(cdf)):
+        cdf[idx] = np.count_nonzero(
+            ~np.isnan(mags[mags >= mag_centers[idx]-0.001]))
 
     mag_edges = np.arange(minmag - magbin/2., maxmag+magbin, magbin)
     g_r, _ = np.histogram(mags, mag_edges)
-    ii = list(g_r).index(max(g_r))
+    idx = list(g_r).index(max(g_r))
 
-    Mc_est = mag_centers[ii]
+    mc_est = mag_centers[idx]
 
     try:
-        Mc_est, bvalue, avalue, L, Mc_bins, std_dev = WW2000(Mc_est, mags,
-                                                             magbin)
+        mc_est, bvalue, avalue, lval, mc_bins, std_dev = WW2000(mc_est, mags,
+                                                                magbin)
     except:
-        Mc_est = Mc_est + 0.3
-        Mc_bins = np.arange(0, maxmag + magbin/2., magbin)
-        bvalue = np.log10(np.exp(1))/(np.average(mags[mags >= Mc_est])
-                          - (Mc_est-magbin/2.))
-        avalue = np.log10(len(mags[mags >= Mc_est])) + bvalue*Mc_est
-        log_L = avalue-bvalue*Mc_bins
-        L = 10.**log_L
-        std_dev = bvalue/sqrt(len(mags[mags >= Mc_est]))
+        mc_est = mc_est + 0.3
+        mc_bins = np.arange(0, maxmag + magbin/2., magbin)
+        bvalue = np.log10(np.exp(1))/(np.average(mags[mags >= mc_est])
+                                      - (mc_est-magbin/2.))
+        avalue = np.log10(len(mags[mags >= mc_est])) + bvalue*mc_est
+        log_l = avalue-bvalue*mc_bins
+        lval = 10.**log_l
+        std_dev = bvalue/sqrt(len(mags[mags >= mc_est]))
 
-    maxincremcomp = mag_centers[ii]
-    pm = u'\u00B1'
-
-    plt.figure(figsize=(8,6))
+    plt.figure(figsize=(8, 6))
     plt.scatter(mag_centers[:-1], g_r, edgecolor='r', marker='o',
                 facecolor='none', label='Incremental')
     plt.scatter(mag_centers, cdf, c='k', marker='+', label='Cumulative')
-    plt.axvline(Mc_est, c='r', linestyle='--', label='Mc = %2.1f' % Mc_est)
-    plt.plot(Mc_bins, L, c='k', linestyle='--', label='B = %1.3f%s%1.3f'
-                                                % (bvalue, pm, std_dev))
+    plt.axvline(mc_est, c='r', linestyle='--', label='Mc = %2.1f' % mc_est)
+    plt.plot(mc_bins, lval, c='k', linestyle='--',
+             label='B = %1.3f%s%1.3f' % (bvalue, u'\u00B1', std_dev))
 
-    ax = plt.gca()
-    ax.set_yscale('log')
+    ax1 = plt.gca()
+    ax1.set_yscale('log')
     max_count = np.amax(cdf) + 100000
-    ax.set_xlim([0, maxmag])
-    ax.set_ylim([1, max_count])
+    ax1.set_xlim([0, maxmag])
+    ax1.set_ylim([1, max_count])
     plt.title('Frequency-Magnitude Distribution', fontsize=18)
     plt.xlabel('Magnitude', fontsize=14)
     plt.ylabel('Log10 Count', fontsize=14)
@@ -699,10 +687,9 @@ def catMagComp(catalog, dirname, magbin=0.1):
     plt.savefig('%s_catmagcomp.png' % dirname, dpi=300)
 
 
-# plot magnitudes vs. origin time
 @printstatus('Graphing magnitude versus time for each earthquake')
-def graphMagTime(catalog, dirname):
-
+def graph_mag_time(catalog, dirname):
+    """Plot magnitudes vs. origin time."""
     catalog = catalog[pd.notnull(catalog['mag']) & (catalog['mag'] > 0)]
     catalog['convtime'] = [' '.join(x.split('T')).split('.')[0]
                            for x in catalog['time'].tolist()]
@@ -711,7 +698,7 @@ def graphMagTime(catalog, dirname):
     times = catalog['time']
     mags = catalog['mag']
 
-    plt.figure(figsize=(10,6))
+    plt.figure(figsize=(10, 6))
     plt.xlabel('Date', fontsize=14)
     plt.ylabel('Magnitude', fontsize=14)
     plt.plot_date(times, mags, alpha=0.7, markersize=2, c='b')
@@ -721,10 +708,9 @@ def graphMagTime(catalog, dirname):
     plt.savefig('%s_magvtime.png' % dirname, dpi=300)
 
 
-# graph cumulative moment release
 @printstatus('Graphing cumulative moment release')
-def cumulMomentRelease(catalog, dirname):
-
+def cumul_moment_release(catalog, dirname):
+    """Graph cumulative moment release."""
     catalog = catalog[pd.notnull(catalog['mag']) & (catalog['mag'] > 0)]
     catalog['convtime'] = [' '.join(x.split('T')).split('.')[0]
                            for x in catalog['time'].tolist()]
@@ -733,19 +719,18 @@ def cumulMomentRelease(catalog, dirname):
 
     minday, maxday = min(times), max(times)
 
-    M0 = 10.**((3/2.)*(catalog['mag']+10.7))
-    M0 = M0 * 10.**(-7)
-    cumulM0 = np.cumsum(M0)
+    mag0 = 10.**((3/2.)*(catalog['mag']+10.7))
+    mag0 = mag0 * 10.**(-7)
+    cumulmag0 = np.cumsum(mag0)
 
-    plt.figure(figsize=(10,6))
-    plt.plot(times, cumulM0, 'k-')
+    plt.figure(figsize=(10, 6))
+    plt.plot(times, cumulmag0, 'k-')
     plt.xlabel('Date', fontsize=14)
     plt.ylabel(r'Cumulative Moment Release (N$\times$m)', fontsize=14)
     plt.xlim(minday, maxday)
     plt.ylim(0)
 
     colors = ['r', 'm', 'c', 'y', 'g']
-    largestnum = 5
     largesteqs = catalog.sort_values('mag').tail(5)
     for i, eq in enumerate(largesteqs.itertuples()):
         plt.axvline(x=eq.time, color=colors[i], linestyle='--')
@@ -753,48 +738,47 @@ def cumulMomentRelease(catalog, dirname):
     plt.savefig('%s_cumulmomentrelease.png' % dirname, dpi=300)
 
 
-# graph possible number of duplicate events given various distances
-# and time differences
 @printstatus('Graphing possible number of duplicate events')
-def catDupSearch(catalog, dirname):
-    
-    nquakes = len(catalog)
-    epochtimes = [toEpoch(row.time) for row in catalog.itertuples()]
+def cat_dup_search(catalog, dirname):
+    """Graph possible number of duplicate events given various distances
+    and time differences.
+    """
+    epochtimes = [to_epoch(row.time) for row in catalog.itertuples()]
     tdifsec = np.asarray(abs(np.diff(epochtimes)))
 
-    lat1 = np.asarray(catalog.latitude[:-1]) 
+    lat1 = np.asarray(catalog.latitude[:-1])
     lon1 = np.asarray(catalog.longitude[:-1])
     lat2 = np.asarray(catalog.latitude[1:])
     lon2 = np.asarray(catalog.longitude[1:])
-    ddelkm = [eqdist(lat1[i], lon1[i], lat2[i], lon2[i])
+    ddelkm = [eq_dist(lat1[i], lon1[i], lat2[i], lon2[i])
               for i in range(len(lat1))]
 
-    df = pd.DataFrame({'tdifsec': tdifsec, 'ddelkm': ddelkm})
+    diffdf = pd.DataFrame({'tdifsec': tdifsec, 'ddelkm': ddelkm})
 
     kmlimits = [1, 2, 4, 8, 16, 32, 64, 128, 256]
     tmax = 16
-    dt = 0.05
-    timebins = np.arange(0, tmax+dt/2, dt)
+    dtime = 0.05
+    timebins = np.arange(0, tmax+dtime/2, dtime)
 
-    nn = np.empty([len(kmlimits), len(timebins)-1])
+    numevents = np.empty([len(kmlimits), len(timebins)-1])
 
-    for jj in range(len(kmlimits)):
+    for jdx in range(len(kmlimits)):
 
-        cat_subset = df[df.ddelkm <= kmlimits[jj]]
+        cat_subset = diffdf[diffdf.ddelkm <= kmlimits[jdx]]
 
-        for ii in range(len(timebins)-1):
+        for idx in range(len(timebins)-1):
 
-            nn[jj][ii] = cat_subset[cat_subset.tdifsec.between(timebins[ii],
-                                    timebins[ii+1])].count()[0]
+            numevents[jdx][idx] = cat_subset[cat_subset.tdifsec.between(
+                timebins[idx], timebins[idx+1])].count()[0]
 
-    totmatch = np.transpose(np.cumsum(np.transpose(nn),axis=0))
+    totmatch = np.transpose(np.cumsum(np.transpose(numevents), axis=0))
 
-    plt.figure(figsize=(10,6))
-    for ii in range(len(kmlimits)):
-        x = timebins[1:]
-        y = totmatch[ii]
-        lab = str(kmlimits[ii]) + ' km'
-        plt.plot(x,y,label=lab)
+    plt.figure(figsize=(10, 6))
+    for idx in range(len(kmlimits)):
+        times = timebins[1:]
+        matches = totmatch[idx]
+        lab = str(kmlimits[idx]) + ' km'
+        plt.plot(times, matches, label=lab)
 
     plt.xlabel('Time (s)', fontsize=14)
     plt.ylabel('Total Number of Events', fontsize=14)
@@ -805,33 +789,43 @@ def catDupSearch(catalog, dirname):
     plt.savefig('%s_catdupsearch.png' % dirname, dpi=300)
 
 
-################################################################################
-################################################################################
-################################################################################
+###############################################################################
+###############################################################################
+###############################################################################
 
 
-#@suppresskbinterrupt()
 def main():
-
+    """Main function. Command line arguments defined here."""
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('catalog', nargs='?', type=str, default='',
-                        help='pick which catalog to download data from')
-    parser.add_argument('startyear', nargs='?', type=int, default=2000,
+    parser.add_argument('catalog', nargs='?', type=str,
+                        help='pick which catalog to download data from; to \
+                        download data from all catalogs, use "all"')
+    parser.add_argument('startyear', nargs='?', type=int,
                         help='pick starting year')
-    parser.add_argument('endyear', nargs='?', type=int, default=2000,
+    parser.add_argument('endyear', nargs='?', type=int,
                         help='pick end year (to get a single year of data, \
                         enter same year as startyear)')
 
     parser.add_argument('-sf', '--specifyfile', type=str,
                         help='specify existing .csv file to use')
     parser.add_argument('-fd', '--forcedownload', action='store_true',
-                        help='forces downloading of data even if .csv file\
+                        help='forces downloading of data even if .csv file \
                         exists')
 
     args = parser.parse_args()
 
     if args.specifyfile is None:
+
+        if not args.catalog:
+            sys.stdout.write('No catalog specified. Exiting...\n')
+            sys.exit()
+        elif not args.startyear:
+            sys.stdout.write('No starting year specified. Exiting...\n')
+            sys.exit()
+        elif not args.endyear:
+            sys.stdout.write('No ending year specified. Exiting...\n')
+            sys.exit()
 
         catalog = args.catalog.lower()
         startyear, endyear = map(int, [args.startyear, args.endyear])
@@ -846,7 +840,7 @@ def main():
             except OSError as exception:
                 if exception.errno != errno.EEXIST:
                     raise
-            datadf = getData(catalog, startyear, endyear, write=True)
+            datadf = get_data(catalog, startyear, endyear, write=True)
         else:
             # Python 2
             try:
@@ -858,7 +852,7 @@ def main():
                     except OSError as exception:
                         if exception.errno != errno.EEXIST:
                             raise
-                    datadf = getData(catalog, startyear, endyear, write=True)
+                    datadf = get_data(catalog, startyear, endyear, write=True)
             # Python 3
             except:
                 try:
@@ -869,7 +863,7 @@ def main():
                     except OSError as exception:
                         if exception.errno != errno.EEXIST:
                             raise
-                    datadf = getData(catalog, startyear, endyear, write=True)
+                    datadf = get_data(catalog, startyear, endyear, write=True)
 
     else:
         from shutil import copy2
@@ -884,34 +878,39 @@ def main():
         datadf = pd.read_csv(args.specifyfile)
         copy2(args.specifyfile, dirname)
 
+    if len(datadf) == 0:
+        sys.stdout.write(('Catalog has no data available for that time period.'
+                          ' Quitting...'))
+        sys.exit()
+
     datadf = datadf.sort_values(by='time').reset_index(drop=True)
     datadf.loc[:, 'ms'] = datadf['time'].str[-4:-1].astype('float')
 
     os.chdir(dirname)
-    basicCatSum(datadf, dirname)
-    mapDetecs(datadf, dirname)
+    basic_cat_sum(datadf, dirname)
+    map_detecs(datadf, dirname)
     plt.close()
-    mapDetecNums(datadf, dirname)
+    map_detec_nums(datadf, dirname)
     plt.close()
-    makeHist(datadf, 'mag', 0.1, dirname, xlabel='Magnitude')
+    make_hist(datadf, 'mag', 0.1, dirname, xlabel='Magnitude')
     plt.close()
-    makeHist(datadf, 'depth', 10, dirname, xlabel='Depth (km)')
+    make_hist(datadf, 'depth', 10, dirname, xlabel='Depth (km)')
     plt.close()
-    makeHist(datadf, 'ms', 20, dirname, xlabel='Milliseconds')
+    make_hist(datadf, 'ms', 20, dirname, xlabel='Milliseconds')
     plt.close()
-    makeTimeHist(datadf, 'hour', dirname)
+    make_time_hist(datadf, 'hour', dirname)
     plt.close()
-    makeTimeHist(datadf, 'day', dirname)
+    make_time_hist(datadf, 'day', dirname)
     plt.close()
-    graphTimeSep(datadf, dirname)
+    graph_time_sep(datadf, dirname)
     plt.close()
-    catMagComp(datadf, dirname)
+    cat_mag_comp(datadf, dirname)
     plt.close()
-    graphMagTime(datadf, dirname)
+    graph_mag_time(datadf, dirname)
     plt.close()
-    cumulMomentRelease(datadf, dirname)
+    cumul_moment_release(datadf, dirname)
     plt.close()
-    catDupSearch(datadf, dirname)
+    cat_dup_search(datadf, dirname)
 
 
 if __name__ == '__main__':
