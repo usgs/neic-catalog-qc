@@ -7,7 +7,7 @@ from functools import wraps
 
 # Retry a function a certain number of times before raising an exception
 def retry(ExceptionToCheck, tries=4, delay=4, backoff=1.5, logger=None):
-    
+
     def deco_retry(f):
 
         @wraps(f)
@@ -38,7 +38,7 @@ class printstatus(object):
         self.status = status
 
     def __call__(self, f, *args, **kwargs):
-        
+
         def new_func(*args, **kwargs):
             sys.stdout.write(self.status + '... ')
             sys.stdout.flush()
