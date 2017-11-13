@@ -585,11 +585,11 @@ def make_time_hist(catalog, timelength, dirname, title=''):
 @printstatus('Graphing mean time separation')
 def graph_time_sep(catalog, dirname):
     """Make bar graph of mean time separation between events by date."""
-    catalog['convtime'] = [' '.join(x.split('T')).split('.')[0]
-                           for x in catalog['time'].tolist()]
-    catalog['convtime'] = catalog['convtime'].astype('datetime64[ns]')
-    catalog['dt'] = catalog.convtime.diff().astype('timedelta64[ns]')
-    catalog['dtmin'] = catalog['dt'] / pd.Timedelta(minutes=1)
+    catalog.loc[:, 'convtime'] = [' '.join(x.split('T')).split('.')[0]
+                                  for x in catalog['time'].tolist()]
+    catalog.loc[:, 'convtime'] = catalog['convtime'].astype('datetime64[ns]')
+    catalog.loc[:, 'dt'] = catalog.convtime.diff().astype('timedelta64[ns]')
+    catalog.loc[:, 'dtmin'] = catalog['dt'] / pd.Timedelta(minutes=1)
 
     mindate = catalog['convtime'].min() - pd.Timedelta(days=15)
     maxdate = catalog['convtime'].max() - pd.Timedelta(days=15)
@@ -691,9 +691,9 @@ def cat_mag_comp(catalog, dirname, magbin=0.1):
 def graph_mag_time(catalog, dirname):
     """Plot magnitudes vs. origin time."""
     catalog = catalog[pd.notnull(catalog['mag']) & (catalog['mag'] > 0)]
-    catalog['convtime'] = [' '.join(x.split('T')).split('.')[0]
-                           for x in catalog['time'].tolist()]
-    catalog['convtime'] = catalog['convtime'].astype('datetime64[ns]')
+    catalog.loc[:, 'convtime'] = [' '.join(x.split('T')).split('.')[0]
+                                  for x in catalog['time'].tolist()]
+    catalog.loc[:, 'convtime'] = catalog['convtime'].astype('datetime64[ns]')
 
     times = catalog['time']
     mags = catalog['mag']
@@ -712,9 +712,9 @@ def graph_mag_time(catalog, dirname):
 def cumul_moment_release(catalog, dirname):
     """Graph cumulative moment release."""
     catalog = catalog[pd.notnull(catalog['mag']) & (catalog['mag'] > 0)]
-    catalog['convtime'] = [' '.join(x.split('T')).split('.')[0]
-                           for x in catalog['time'].tolist()]
-    catalog['convtime'] = catalog['convtime'].astype('datetime64[ns]')
+    catalog.loc[:, 'convtime'] = [' '.join(x.split('T')).split('.')[0]
+                                  for x in catalog['time'].tolist()]
+    catalog.loc[:, 'convtime'] = catalog['convtime'].astype('datetime64[ns]')
     times = catalog['convtime']
 
     minday, maxday = min(times), max(times)
@@ -736,6 +736,26 @@ def cumul_moment_release(catalog, dirname):
         plt.axvline(x=eq.time, color=colors[i], linestyle='--')
 
     plt.savefig('%s_cumulmomentrelease.png' % dirname, dpi=300)
+
+
+@printstatus('Graphing cumulative event types')
+def graph_event_types(catalog, dirname):
+    """Graph number of cumulative events by type of event."""
+    typedict = {}
+
+    for evtype in catalog['type'].unique():
+        typedict[evtype] = (catalog['type'] == evtype).cumsum()
+
+    plt.figure(figsize=(12, 6))
+
+    for evtype in typedict:
+        plt.plot_date(catalog['time'], typedict[evtype], marker=None,
+                      linestyle='-', label=evtype)
+
+    plt.yscale('log')
+    plt.legend()
+
+    plt.savefig('%s_cumuleventtypes.png' % dirname, dpi=300)
 
 
 @printstatus('Graphing possible number of duplicate events')
@@ -909,6 +929,8 @@ def main():
     graph_mag_time(datadf, dirname)
     plt.close()
     cumul_moment_release(datadf, dirname)
+    plt.close()
+    graph_event_types(datadf, dirname)
     plt.close()
     cat_dup_search(datadf, dirname)
 
