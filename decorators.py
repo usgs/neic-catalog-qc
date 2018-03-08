@@ -31,7 +31,7 @@ def retry(ExceptionToCheck, tries=4, delay=4, backoff=1.5, logger=None):
 
     return deco_retry
 
-
+# Print a status message when a function is running
 class printstatus(object):
 
     def __init__(self, status):

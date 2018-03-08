@@ -13,3 +13,4 @@ Required Python packages
 2. [Matplotlib](https://matplotlib.org)
 3. [Pandas](http://pandas.pydata.org)
 4. [Cartopy](http://scitools.org.uk/cartopy)
+5. [ObsPy](https://www.obspy.org)
