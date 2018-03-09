@@ -14,8 +14,9 @@ from scipy import stats
 import numpy as np
 import pandas as pd
 import cartopy.crs as ccrs
+import cartopy.feature as cfeature
 import matplotlib.pyplot as plt
-from decorators import retry, printstatus
+from obspy.geodetics.base import gps2dist_azimuth
 
 # Python 2
 try:
@@ -24,277 +25,13 @@ try:
 except ImportError:
     from urllib.request import urlopen, HTTPError
 
-
-###############################################################################
-############################## Auxiliary Functions ############################
-###############################################################################
-
-
-def progress_bar(count, total, status=''):
-    """Show progress bar for whatever task."""
-    barlen = 50
-    filledlen = int(round(barlen * count / float(total)))
-
-    percents = round(100. * count / float(total), 1)
-    pbar = '#' * filledlen + '-' * (barlen-filledlen)
-
-    if percents < 100.0:
-        sys.stdout.write('[%s] %s%s  %s\r' % (pbar, percents, '%', status))
-        sys.stdout.flush()
-    else:
-        sys.stdout.write('[%s] %s%s %s\n' % (pbar, percents, '%',
-                                             'Done downloading data' +
-                                             ' '*(len(status)-21)))
-        sys.stdout.flush()
-
-
-@retry(HTTPError, tries=5, delay=0.5, backoff=1)
-def access_url(url):
-    """Return list of lines in url; if HTTPError, repeat."""
-    return [line.rstrip() for line in urlopen(url).readlines()]
-
-
-def format_time(ogtime):
-    """Increase readability of given catalog times."""
-    return pd.Timestamp(' '.join(ogtime.split('T'))[:-1])
-
-
-def to_epoch(ogtime):
-    """Convert formatted time to Unix/epoch time."""
-    fstr = '%Y-%m-%dT%H:%M:%S.%fZ'
-    epoch = datetime(1970, 1, 1)
-    finaltime = (datetime.strptime(ogtime, fstr) - epoch).total_seconds()
-
-    return finaltime
-
-
-def trim_times(cat1, cat2, otwindow):
-    """Trim catalogs so they span the same time window."""
-    mintime = max(cat1['time'].min(), cat2['time'].min())
-    maxtime = min(cat1['time'].max(), cat2['time'].max())
-    adjmin = mintime - otwindow
-    adjmax = maxtime + otwindow
-
-    cat1trim = cat1[cat1['time'].between(adjmin, adjmax, inclusive=True)
-                   ].copy()
-    cat2trim = cat2[cat2['time'].between(adjmin, adjmax, inclusive=True)
-                   ].copy()
-    cat1trim = cat1trim.reset_index(drop=True)
-    cat2trim = cat2trim.reset_index(drop=True)
-
-    return cat1trim, cat2trim
-
-
-def eq_dist(lon1, lat1, lon2, lat2):
-    """Calculate equirectangular distance between two points."""
-    lon1, lat1, lon2, lat2 = map(radians, [lon1, lat1, lon2, lat2])
-    xval = (lon2 - lon1) * cos(0.5 * (lat2+lat1))
-    yval = lat2 - lat1
-    eqd = 6371 * sqrt(xval*xval + yval*yval)
-
-    return eqd
-
-
-def get_az(lon1, lat1, lon2, lat2):
-    """Calculate azimuth from point 1 to point 2."""
-    lon1, lat1, lon2, lat2 = map(radians, [lon1, lat1, lon2, lat2])
-    londiff = lon2 - lon1
-    xval = sin(londiff) * cos(lat2)
-    yval = cos(lat1)*sin(lat2) - (sin(lat1)*cos(lat2)*cos(londiff))
-    azi = (degrees(atan2(xval, yval)) + 360) % 360
-
-    return azi
-
-
-def get_azs_and_dists(cat1, cat2, cat1mids, cat2mids):
-    """Calculate azimuths for all matches between two catalogs."""
-    azimuths = []
-    dists = []
-
-    for idx, eid in enumerate(cat1mids):
-        mask1 = cat1['id'] == eid
-        mask2 = cat2['id'] == cat2mids[idx]
-
-        lon1, lat1 = cat1[mask1].longitude, cat1[mask1].latitude
-        lon2, lat2 = cat2[mask2].longitude, cat2[mask2].latitude
-
-        azi = get_az(lon1, lat1, lon2, lat2)
-        dist = eq_dist(lon1, lat1, lon2, lat2)
-        azimuths.append(azi)
-        dists.append(dist)
-
-    return azimuths, dists
-
-
-def cond(row1, row2, otwindow, distwindow):
-    """Condition for event matching."""
-    lon1, lat1 = row1.longitude, row1.latitude
-    lon2, lat2 = row2.longitude, row2.latitude
-
-    return (eq_dist(lon1, lat1, lon2, lat2) < distwindow) \
-        & (abs(row1.time - row2.time) < otwindow)
-
-
-def get_map_bounds(cat1, cat2):
-    """Generate map bounds and gridsize."""
-    minlat1, maxlat1 = cat1['latitude'].min(), cat1['latitude'].max()
-    minlon1, maxlon1 = cat1['longitude'].min(), cat1['longitude'].max()
-    minlat2, maxlat2 = cat2['latitude'].min(), cat2['latitude'].max()
-    minlon2, maxlon2 = cat2['longitude'].min(), cat2['longitude'].max()
-
-    minlat, maxlat = min(minlat1, minlat2), max(maxlat1, maxlat2)
-    minlon, maxlon = min(minlon1, minlon2), max(maxlon1, maxlon2)
-
-    latdiff, londiff = (maxlat-minlat) / 5., (maxlon-minlon) / 5.
-    lllat, lllon = max(minlat-latdiff, -90), max(minlon-londiff, -180)
-    urlat, urlon = min(maxlat+latdiff, 90), min(maxlon+londiff, 180)
-
-    if (lllon < 175) and (urlon > 175) \
-            and (len(cat1[cat1['longitude'].between(-100, 100)]) == 0):
-
-        lllon = cat1[cat1['longitude'] > 0].min()['longitude']
-        urlon = 360 + cat1[cat1['longitude'] < 0].max()['longitude']
-        clon = 180
-
-    else:
-        clon = 0
-
-    gridsize = max(urlat-lllat, urlon-lllon) / 45.
-    hgridsize, tgridsize = gridsize / 2., gridsize / 10.
-
-    return lllat, lllon, urlat, urlon, gridsize, hgridsize, tgridsize, clon
-
-
-def round2bin(number, binsize, direction):
-    """Round number to nearest histogram bin edge (either "up" or "down")."""
-    if direction == 'down':
-        return number - (number % binsize)
-    if direction == 'up':
-        return number - (number % binsize) + binsize
+import QCutils as qcu
+from decorators import retry, printstatus
 
 
 ###############################################################################
-################################# Main Functions ##############################
 ###############################################################################
-
-
-def get_data(catalog1, catalog2, startyear, endyear, minmag=0.1, maxmag=10,
-             write=False):
-    """Download catalog data from earthquake.usgs.gov"""
-    catalog1, catalog2 = catalog1.lower(), catalog2.lower()
-    year = startyear
-    alldata1, alldata2 = [], []
-    cat1name = catalog1 if catalog1 else 'all'
-    cat2name = catalog2 if catalog2 else 'all'
-
-    if cat1name == cat2name:
-        print('Catalogs cannot be the same. Exiting...')
-        sys.exit()
-
-    dirname = '%s-%s%s-%s' % (cat1name, cat2name, startyear, endyear)
-    f1name = '%s%s-%s.csv' % (cat1name, startyear, endyear)
-    f2name = '%s%s-%s.csv' % (cat2name, startyear, endyear)
-    bartotal = 12 * (endyear - startyear + 1)
-    barcount = 1
-
-    while year <= endyear:
-
-        month = 1
-        yeardata1, yeardata2 = [], []
-
-        while month <= 12:
-
-            if month in [4, 6, 9, 11]:
-                endday = 30
-
-            elif month == 2:
-                checkly = (year % 4)
-
-                if checkly == 0:
-                    endday = 29
-                else:
-                    endday = 28
-            else:
-                endday = 31
-
-            startd = '-'.join([str(year), str(month)])
-            endd = '-'.join([str(year), str(month), str(endday)])
-
-            if not catalog1:
-                url1 = ('https://earthquake.usgs.gov/fdsnws/event/1/query'
-                        '.csv?starttime=' + startd + '-1%2000:00:00'
-                        '&endtime=' + endd + '%2023:59:59&orderby=time-asc'
-                        '&minmagnitude=' + str(minmag) + '&maxmagnitude=' +
-                        str(maxmag))
-            else:
-                url1 = ('https://earthquake.usgs.gov/fdsnws/event/1/query'
-                        '.csv?starttime=' + startd + '-1%2000:00:00'
-                        '&endtime=' + endd + '%2023:59:59&orderby=time-asc'
-                        '&catalog=' + catalog1 + '&minmagnitude=' +
-                        str(minmag) + '&maxmagnitude=' + str(maxmag))
-
-            if not catalog2:
-                url2 = ('https://earthquake.usgs.gov/fdsnws/event/1/query'
-                        '.csv?starttime=' + startd + '-1%2000:00:00'
-                        '&endtime=' + endd + '%2023:59:59&orderby=time-asc'
-                        '&minmagnitude=' + str(minmag) + '&maxmagnitude=' +
-                        str(maxmag))
-            else:
-                url2 = ('https://earthquake.usgs.gov/fdsnws/event/1/query'
-                        '.csv?starttime=' + startd + '-1%2000:00:00'
-                        '&endtime=' + endd + '%2023:59:59&orderby=time-asc'
-                        '&catalog=' + catalog2 + '&minmagnitude=' +
-                        str(minmag) + '&maxmagnitude=' + str(maxmag))
-
-            monthdata1 = access_url(url1)
-            monthdata2 = access_url(url2)
-
-            if (month != 1) or (year != startyear):
-                del monthdata1[0]
-                del monthdata2[0]
-
-            yeardata1.append(monthdata1)
-            yeardata2.append(monthdata2)
-
-            progress_bar(barcount, bartotal, 'Downloading data ... ')
-            barcount += 1
-            month += 1
-
-        alldata1.append(yeardata1)
-        alldata2.append(yeardata2)
-
-        year += 1
-
-    alldata1 = [item for sublist in alldata1 for item in sublist]
-    alldata1 = [item for sublist in alldata1 for item in sublist]
-    alldata2 = [item for sublist in alldata2 for item in sublist]
-    alldata2 = [item for sublist in alldata2 for item in sublist]
-
-    if write:
-        with open('%s/%s' % (dirname, f1name), 'w') as openfile:
-            for event in alldata1:
-                openfile.write('%s\n' % event.decode())
-        alldatadf1 = pd.read_csv('%s/%s' % (dirname, f1name))
-
-        with open('%s/%s' % (dirname, f2name), 'w') as openfile:
-            for event in alldata2:
-                openfile.write('%s\n' % event.decode())
-        alldatadf2 = pd.read_csv('%s/%s' % (dirname, f2name))
-
-    else:
-        with open('getDataTEMP1.csv', 'w') as openfile:
-            for event in alldata1:
-                openfile.write('%s\n' % event.decode())
-        alldatadf1 = pd.read_csv('getDataTEMP1.csv')
-
-        with open('getDataTEMP2.csv', 'w') as openfile:
-            for event in alldata2:
-                openfile.write('%s\n' % event.decode())
-        alldatadf2 = pd.read_csv('getDataTEMP2.csv')
-        os.remove('getDataTEMP1.csv')
-        os.remove('getDataTEMP2.csv')
-
-    return alldatadf1, alldatadf2
+###############################################################################
 
 
 @printstatus('Creating basic catalog summary')
@@ -338,8 +75,8 @@ def comp_criteria(cat1, cat2, dirname, reg, otwindow=16, distwindow=100):
     """Trim catalogs and summarize comparison criteria."""
     lines = []
 
-    mintime = format_time(max(cat1['time'].min(), cat2['time'].min()))
-    maxtime = format_time(min(cat1['time'].max(), cat2['time'].max()))
+    mintime = qcu.format_time(max(cat1['time'].min(), cat2['time'].min()))
+    maxtime = qcu.format_time(min(cat1['time'].max(), cat2['time'].max()))
 
     lines.append('Overlapping time period: %s to %s\n' % (mintime, maxtime))
     lines.append('Region: %s\n' % reg)
@@ -357,10 +94,10 @@ def comp_criteria(cat1, cat2, dirname, reg, otwindow=16, distwindow=100):
 @printstatus(status='Matching events')
 def match_events(cat1, cat2, otwindow=16, distwindow=100):
     """Match events within two catalogs."""
-    cat1.loc[:, 'time'] = [to_epoch(x) for x in cat1['time']]
-    cat2.loc[:, 'time'] = [to_epoch(x) for x in cat2['time']]
+    cat1.loc[:, 'time'] = [qcu.to_epoch(x) for x in cat1['time']]
+    cat2.loc[:, 'time'] = [qcu.to_epoch(x) for x in cat2['time']]
 
-    cat1, cat2 = trim_times(cat1, cat2, otwindow)
+    cat1, cat2 = qcu.trim_times(cat1, cat2, otwindow)
 
     cat1ids, cat2ids = [], []
 
@@ -371,11 +108,9 @@ def match_events(cat1, cat2, otwindow=16, distwindow=100):
 
         if len(cat2ix) != 0:
 
-            carr = np.array([eq_dist(cat1.ix[i]['longitude'],
-                                     cat1.ix[i]['latitude'],
-                                     cat2.ix[x]['longitude'],
-                                     cat2.ix[x]['latitude'])
-                             for x in cat2ix])
+            carr = np.array([gps2dist_azimuth(cat1.ix[i]['latitude'],
+                cat1.ix[i]['longitude'], cat2.ix[x]['latitude'],
+                cat2.ix[x]['longitude'])[0] / 1000. for x in cat2ix])
 
             inds = np.where(carr < distwindow)[0]
 
@@ -396,7 +131,7 @@ def match_events(cat1, cat2, otwindow=16, distwindow=100):
 @printstatus('Mapping events from both catalogs')
 def map_events(cat1, cat2, reg, dirname):
     """Map catalog events only within the appropriate region."""
-    lllat, lllon, urlat, urlon, _, _, _, clon = get_map_bounds(cat1, cat2)
+    lllat, lllon, urlat, urlon, _, _, _, clon = qcu.get_map_bounds(cat1, cat2)
 
     regionmat = scipy.io.loadmat('../regions.mat')
     regdict = {regionmat['region'][i][0][0]: x[0]
@@ -416,17 +151,22 @@ def map_events(cat1, cat2, reg, dirname):
                    transform=ccrs.PlateCarree())
     mplmap.scatter(cat2lons, cat2lats, color='r', s=2, zorder=4,
                    transform=ccrs.PlateCarree())
-    mplmap.plot(reglons, reglats, c='k', linestyle='--', zorder=5,
-                transform=ccrs.PlateCarree())
+    mplmap.add_feature(cfeature.NaturalEarthFeature('cultural',
+        'admin_1_states_provinces_lines', '50m', facecolor='none',
+        edgecolor='k', zorder=9))
+    mplmap.add_feature(cfeature.BORDERS)
 
     plt.savefig('%s_mapmatcheddetecs.png' % dirname, dpi=300)
+    plt.close()
 
 
 @printstatus('Graphing polar histogram of azimuths and distances')
 def make_az_dist(cat1, cat2, cat1mids, cat2mids, dirname,
                  distwindow=100, numbins=16):
     """Make polar scatter/histogram of azimuth vs. distance."""
-    azimuths, distances = get_azs_and_dists(cat1, cat2, cat1mids, cat2mids)
+    azimuths, distances = qcu.get_azs_and_dists(cat1, cat2, cat1mids, cat2mids)
+
+    cat1name, cat2name = dirname[0:2].upper(), dirname[3:5].upper()
 
     width = 2*pi / numbins
     razimuths = list(map(radians, azimuths))
@@ -443,6 +183,8 @@ def make_az_dist(cat1, cat2, cat1mids, cat2mids, dirname,
     ax1.set_rmax(distwindow)
     ax1.set_theta_direction(-1)
     ax1.set_rlabel_position(112.5)
+    ax1.set_title('%s location relative to %s' % (cat1name, cat2name),
+                  fontsize=20)
 
     for _, hbar in list(zip(hist, bars)):
         hbar.set_facecolor('b')
@@ -451,6 +193,7 @@ def make_az_dist(cat1, cat2, cat1mids, cat2mids, dirname,
     plt.subplots_adjust(left=0.1, right=0.95, top=0.9, bottom=0.11)
 
     plt.savefig('%s_polarazimuth.png' % dirname, dpi=300)
+    plt.close()
 
 
 @printstatus('Comparing parameters of matched events')
@@ -465,17 +208,32 @@ def compare_params(cat1, cat2, cat1mids, cat2mids, param, dirname):
         cat1params.append(param1)
         cat2params.append(param2)
 
+    minparam = max(min(cat1params), min(cat2params))
+    maxparam = min(max(cat1params), max(cat2params))
+
     mval, bval, rval, _, _ = stats.linregress(cat1params, cat2params)
     linegraph = [mval*x + bval for x in cat1params]
     r2val = rval*rval
 
+    cat1name, cat2name = dirname[0:2].upper(), dirname[3:5].upper()
+    aparam = param if param != 'mag' else 'magnitude'
+    tparam = aparam.capitalize()
+
+    plt.figure(figsize=(8, 8))
     plt.scatter(cat1params, cat2params, edgecolor='b', facecolor=None)
     plt.plot(cat1params, linegraph, c='r', linewidth=1,
              label=r'$\mathregular{R^2}$ = %0.2f' % r2val)
     plt.plot(cat1params, cat1params, c='k', linewidth=1, label='B = 1')
     plt.legend(loc='upper left')
+    plt.xlim(minparam, maxparam)
+    plt.ylim(minparam, maxparam)
+    plt.xlabel('%s %s' % (cat1name, aparam), fontsize=14)
+    plt.ylabel('%s %s' % (cat2name, aparam), fontsize=14)
+
+    plt.title('%s correlation' % tparam, fontsize=20)
 
     plt.savefig('%s_compare%s.png' % (dirname, param), dpi=300)
+    plt.close()
 
 
 @printstatus('Graphing parameter differences between matched events')
@@ -493,8 +251,8 @@ def make_diff_hist(cat1, cat2, cat1mids, cat2mids, param, binsize, dirname,
         paramdiffs.append(pardiff)
 
     minpardiff, maxpardiff = min(paramdiffs or [0]), max(paramdiffs or [0])
-    pardiffdown = round2bin(minpardiff, binsize, 'down')
-    pardiffup = round2bin(maxpardiff, binsize, 'up')
+    pardiffdown = qcu.round2bin(minpardiff, binsize, 'down')
+    pardiffup = qcu.round2bin(maxpardiff, binsize, 'up')
     numbins = int((pardiffup-pardiffdown) / binsize)
     pardiffbins = np.linspace(pardiffdown, pardiffup+binsize,
                               numbins+2) - binsize/2.
@@ -512,6 +270,7 @@ def make_diff_hist(cat1, cat2, cat1mids, cat2mids, param, binsize, dirname,
     plt.ylim(0)
 
     plt.savefig('%s_%sdiffs.png' % (dirname, param), dpi=300)
+    plt.close()
 
 
 ###############################################################################
@@ -568,8 +327,8 @@ def main():
             except OSError as exception:
                 if exception.errno != errno.EEXIST:
                     raise
-            datadf1, datadf2 = get_data(cat1, cat2, startyear, endyear,
-                                        write=True)
+            datadf1, datadf2 = qcu.get_data(cat1, catalog2=cat2,
+                startyear=startyear, endyear=endyear)
         else:
             # Python 2
             try:
@@ -584,8 +343,8 @@ def main():
                     except OSError as exception:
                         if exception.errno != errno.EEXIST:
                             raise
-                    datadf1, datadf2 = get_data(cat1, cat2, startyear, endyear,
-                                                write=True)
+                    datadf1, datadf2 = qcu.get_data(cat1, catalog2=cat2,
+                        startyear=startyear, endyear=endyear)
             # Python 3
             except:
                 try:
@@ -599,8 +358,8 @@ def main():
                     except OSError as exception:
                         if exception.errno != errno.EEXIST:
                             raise
-                    datadf1, datadf2 = get_data(cat1, cat2, startyear, endyear,
-                                                write=True)
+                    datadf1, datadf2 = qcu.get_data(cat1, catalog2=cat2,
+                        startyear=startyear, endyear=endyear)
 
     else:
         from shutil import copy2
@@ -621,12 +380,12 @@ def main():
 
     if len(datadf1) == 0:
         sys.stdout.write(('%s catalog has no data available for that time '
-                          'period. Quitting...') % cat1.upper())
+                          'period. Quitting...\n') % cat1.upper())
         sys.exit()
 
     if len(datadf2) == 0:
         sys.stdout.write(('%s catalog has no data available for that time '
-                          'period. Quitting...') % cat2.upper())
+                          'period. Quitting...\n') % cat2.upper())
         sys.exit()
 
     os.chdir(dirname)
@@ -634,22 +393,20 @@ def main():
     basic_cat_sum(datadf2, cat2, dirname)
     comp_criteria(datadf1, datadf2, dirname, cat1.upper())
     cat1ids, cat2ids, newcat1, newcat2 = match_events(datadf1, datadf2)
+
     map_events(newcat1, newcat2, cat1.upper(), dirname)
-    plt.close()
     make_az_dist(newcat1, newcat2, cat1ids, cat2ids, dirname)
-    plt.close()
     compare_params(newcat1, newcat2, cat1ids, cat2ids, 'mag', dirname)
-    plt.close()
     compare_params(newcat1, newcat2, cat1ids, cat2ids, 'depth', dirname)
-    plt.close()
     make_diff_hist(newcat1, newcat2, cat1ids, cat2ids, 'time', 0.5, dirname,
-                   xlabel='Time residuals (sec)')
-    plt.close()
+                   xlabel='%s-%s time residuals (sec)' % (cat1.upper(),
+                   cat2.upper()))
     make_diff_hist(newcat1, newcat2, cat1ids, cat2ids, 'mag', 0.1, dirname,
-                   xlabel='Magnitude residuals')
-    plt.close()
+                   xlabel='%s-%s magnitude residuals' % (cat1.upper(),
+                   cat2.upper()))
     make_diff_hist(newcat1, newcat2, cat1ids, cat2ids, 'depth', 2, dirname,
-                   xlabel='Depth residuals (km)')
+                   xlabel='%s-%s depth residuals (km)' % (cat1.upper(),
+                   cat2.upper()))
 
 
 if __name__ == '__main__':

@@ -12,10 +12,11 @@ from math import sqrt, radians, cos
 import numpy as np
 import pandas as pd
 import cartopy.crs as ccrs
+import cartopy.feature as cfeature
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.patches import Polygon
-from decorators import retry, printstatus
+from obspy.geodetics.base import gps2dist_azimuth
 
 # Python 2
 try:
@@ -24,306 +25,13 @@ try:
 except ImportError:
     from urllib.request import urlopen, HTTPError
 
-
-###############################################################################
-############################## Auxiliary Functions ############################
-###############################################################################
-
-
-def progress_bar(count, total, status=''):
-    """Show progress bar for whatever task."""
-    barlen = 50
-    filledlen = int(round(barlen * count / float(total)))
-
-    percents = round(100. * count / float(total), 1)
-    pbar = '#' * filledlen + '-' * (barlen-filledlen)
-
-    if percents < 100.0:
-        sys.stdout.write('[%s] %s%s  %s\r' % (pbar, percents, '%', status))
-        sys.stdout.flush()
-    else:
-        sys.stdout.write('[%s] %s%s %s\n' % (pbar, percents, '%',
-                                             'Done downloading data' +
-                                             ' '*(len(status)-21)))
-        sys.stdout.flush()
-
-
-@retry(HTTPError, tries=5, delay=0.5, backoff=1)
-def access_url(url):
-    """Return list of lines in url; if HTTPError, repeat."""
-    return [line.rstrip() for line in urlopen(url).readlines()]
-
-
-def get_map_bounds(catalog):
-    """Generate map bounds and gridsize."""
-    minlat, maxlat = catalog['latitude'].min(), catalog['latitude'].max()
-    minlon, maxlon = catalog['longitude'].min(), catalog['longitude'].max()
-    latdiff, londiff = (maxlat-minlat) / 5., (maxlon-minlon) / 5.
-    lllat, lllon = max(minlat-latdiff, -90), max(minlon-londiff, -180)
-    urlat, urlon = min(maxlat+latdiff, 90), min(maxlon+londiff, 180)
-
-    if (lllon < 175) and (urlon > 175) \
-            and (len(catalog[catalog['longitude'].between(-100, 100)]) == 0):
-
-        lllon = catalog[catalog['longitude'] > 0].min()['longitude']
-        urlon = 360 + catalog[catalog['longitude'] < 0].max()['longitude']
-        clon = 180
-
-    else:
-        clon = 0
-
-    gridsize = max(urlat-lllat, urlon-lllon) / 45.
-    hgridsize, tgridsize = gridsize / 2., gridsize / 10.
-
-    return lllat, lllon, urlat, urlon, gridsize, hgridsize, tgridsize, clon
-
-
-def round2center(num, gridsize):
-    """Round number to nearest grid-square center."""
-    hgridsize = gridsize / 2
-
-    return num - (num % gridsize) + hgridsize
-
-
-def round2lon(num):
-    """Round number to nearest timezone longitude."""
-    return 15 * round(num / 15.)
-
-
-def add_centers(catalog, gridsize):
-    """Add corresponding centers to catalog."""
-    zippedlatlon = list(zip(round2center(catalog['latitude'], gridsize),
-                            round2center(catalog['longitude'], gridsize)))
-    catalog = catalog.reset_index()
-    catalog.loc[:, 'center'] = pd.Series(zippedlatlon)
-    catalog = catalog.set_index('index')
-    catalog.index.names = ['']
-
-    return catalog
-
-
-def group_lat_lons(catalog, minmag=0):
-    """Group detections by nearest grid-square center, and return min/max
-    of counts.
-    """
-    if not catalog['mag'].isnull().all():
-        magmask = catalog['mag'] >= minmag
-        groupedlatlons = catalog[magmask].groupby('center')
-        groupedlatlons = groupedlatlons.count().sort_index()
-    elif catalog['mag'].isnull().all() and (minmag != 0):
-        groupedlatlons = catalog.groupby('center').count().sort_index()
-        print("No magnitude data in catalog - plotting all events")
-    else:
-        groupedlatlons = catalog.groupby('center').count().sort_index()
-    groupedlatlons = groupedlatlons[['id']]
-    groupedlatlons.columns = ['count']
-    cmin = min(list(groupedlatlons['count']) or [0])
-    cmax = max(list(groupedlatlons['count']) or [0])
-
-    return groupedlatlons, cmin, cmax
-
-
-def range2rgb(rmin, rmax, numcolors):
-    """Create a list of red RGB values using colmin and colmax with numcolors
-    number of colors.
-    """
-    colors = np.linspace(rmax/255., rmin/255., numcolors)
-    colors = [(min(1, x), max(0, x-1), max(0, x-1)) for x in colors]
-
-    return colors
-
-
-def draw_grid(lats, lons, col, alpha=1):
-    """Draw rectangle with vertices given in degrees."""
-    latlons = list(zip(lons, lats))
-    poly = Polygon(latlons, facecolor=col, alpha=alpha, edgecolor='k',
-                   zorder=11, transform=ccrs.PlateCarree())
-    plt.gca().add_patch(poly)
-
-
-def round2bin(number, binsize, direction):
-    """Round number to nearest histogram bin edge (either "up" or "down")."""
-    if direction == 'down':
-        return number - (number % binsize)
-    if direction == 'up':
-        return number - (number % binsize) + binsize
-
-
-def WW2000(mcval, mags, binsize):
-    """Wiemer and Wyss (2000) method for determining a and b values."""
-    mags = mags[~np.isnan(mags)]
-    mags = np.around(mags, 1)
-    mc_vec = np.arange(mcval-1.5, mcval+1.5+binsize/2., binsize)
-    max_mag = max(mags)
-    corr = binsize / 2.
-    bvalue = np.zeros(len(mc_vec))
-    std_dev = np.zeros(len(mc_vec))
-    avalue = np.zeros(len(mc_vec))
-    rval = np.zeros(len(mc_vec))
-
-    for idx in range(len(mc_vec)):
-        mval = mags[mags >= mc_vec[idx]-0.001]
-        mag_bins_edges = np.arange(mc_vec[idx]-binsize/2., max_mag+binsize,
-                                   binsize)
-        mag_bins_centers = np.arange(mc_vec[idx], max_mag+binsize/2., binsize)
-
-        cdf = np.zeros(len(mag_bins_centers))
-
-        for jdx in range(len(cdf)):
-            cdf[jdx] = np.count_nonzero(~np.isnan(mags[
-                mags >= mag_bins_centers[jdx]-0.001]))
-
-        bvalue[idx] = np.log10(np.exp(1))/(np.average(mval)
-                                           - (mc_vec[idx]-corr))
-        std_dev[idx] = bvalue[idx]/sqrt(cdf[0])
-
-        avalue[idx] = np.log10(len(mval)) + bvalue[idx]*mc_vec[idx]
-        log_l = avalue[idx] - bvalue[idx]*mag_bins_centers
-        lval = 10.**log_l
-
-        bval, _ = np.histogram(mval, mag_bins_edges)
-        sval = abs(np.diff(lval))
-        rval[idx] = (sum(abs(bval[:-1] - sval))/len(mval))*100
-
-    ind = np.where(rval <= 10)[0]
-
-    if len(ind) != 0:
-        idx = ind[0]
-    else:
-        idx = list(rval).index(min(rval))
-
-    mcval = mc_vec[idx]
-    bvalue = bvalue[idx]
-    avalue = avalue[idx]
-    std_dev = std_dev[idx]
-    mag_bins = np.arange(0, max_mag+binsize/2., binsize)
-    lval = 10.**(avalue-bvalue*mag_bins)
-
-    return mcval, bvalue, avalue, lval, mag_bins, std_dev
-
-
-def to_epoch(ogtime):
-    """Convert from ComCat time format to Unix/epoch time."""
-    fstr = '%Y-%m-%dT%H:%M:%S.%fZ'
-    epoch = datetime(1970, 1, 1)
-    epochtime = (datetime.strptime(ogtime, fstr) - epoch).total_seconds()
-
-    return epochtime
-
-
-def eq_dist(lat1, lon1, lat2, lon2):
-    """Calculate equirectangular distance between two points."""
-    lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
-    xval = (lon2 - lon1) * cos(0.5 * (lat2+lat1))
-    yval = lat2 - lat1
-    eqd = 6371 * sqrt(xval*xval + yval*yval)
-
-    return eqd
+import QCutils as qcu
+from decorators import retry, printstatus
 
 
 ###############################################################################
-################################# Main Functions ##############################
 ###############################################################################
-
-
-def get_data(catalog, startyear, endyear, minmag=0.1, maxmag=10, system=0,
-             write=False):
-    """Download catalog data from earthquake.usgs.gov"""
-    systems = ['prod01', 'prod02', 'dev', 'dev01', 'dev02']
-    syval = systems[system]
-    catalog = catalog.lower()
-    year = startyear
-    alldata = []
-    catname = catalog if catalog else 'all'
-    if catname == 'all':
-        catalog = ''
-    dirname = '%s%s-%s' % (catname, startyear, endyear)
-    fname = '%s.csv' % dirname
-    bartotal = 12 * (endyear - startyear + 1)
-    barcount = 1
-
-    while year <= endyear:
-
-        month = 1
-        yeardata = []
-
-        while month <= 12:
-
-            if month in [4, 6, 9, 11]:
-                endday = 30
-
-            elif month == 2:
-                checkly = (year % 4)
-
-                if checkly == 0:
-                    endday = 29
-                else:
-                    endday = 28
-            else:
-                endday = 31
-
-            startd = '-'.join([str(year), str(month)])
-            endd = '-'.join([str(year), str(month), str(endday)])
-
-            if not catalog:
-                if system == 0:
-                    url = ('https://earthquake.usgs.gov/fdsnws/event/1/query'
-                           '.csv?starttime=' + startd + '-1%2000:00:00'
-                           '&endtime=' + endd + '%2023:59:59&orderby=time-asc'
-                           '&minmagnitude=' + str(minmag) + '&maxmagnitude=' +
-                           str(maxmag))
-                else:
-                    url = ('https://' + syval + '-earthquake.cr.usgs.gov/'
-                           'fdsnws/event/1/query.csv?starttime=' + startd +
-                           '-1%2000:00:00&endtime=' + endd + '%2023:59:59'
-                           '&orderby=time-asc&minmagnitude=' + str(minmag) +
-                           '&maxmagnitude=' + str(maxmag))
-            else:
-                if system == 0:
-                    url = ('https://earthquake.usgs.gov/fdsnws/event/1/query'
-                           '.csv?starttime=' + startd + '-1%2000:00:00'
-                           '&endtime=' + endd + '%2023:59:59&orderby=time-asc'
-                           '&catalog=' + catalog + '&minmagnitude=' +
-                           str(minmag) + '&maxmagnitude=' + str(maxmag))
-                else:
-                    url = ('https://' + syval + '-earthquake.cr.usgs.gov/'
-                           'fdsnws/event/1/query.csv?starttime=' + startd +
-                           '-1%2000:00:00&endtime=' + endd + '%2023:59:59'
-                           '&orderby=&catalog=' + catalog + 'time-asc'
-                           '&minmagnitude=' + str(minmag) + '&maxmagnitude=' +
-                           str(maxmag))
-
-            monthdata = access_url(url)
-
-            if (month != 1) or (year != startyear):
-                del monthdata[0]
-
-            yeardata.append(monthdata)
-
-            progress_bar(barcount, bartotal, 'Downloading data ...')
-            barcount += 1
-            month += 1
-
-        alldata.append(yeardata)
-
-        year += 1
-
-    alldata = [item for sublist in alldata for item in sublist]
-    alldata = [item for sublist in alldata for item in sublist]
-
-    if write:
-        with open('%s/%s' % (dirname, fname), 'w') as openfile:
-            for event in alldata:
-                openfile.write('%s\n' % event.decode())
-        alldatadf = pd.read_csv('%s/%s' % (dirname, fname))
-    else:
-        with open('getDataTEMP.csv', 'w') as openfile:
-            for event in alldata:
-                openfile.write('%s\n' % event.decode())
-        alldatadf = pd.read_csv('getDataTEMP.csv')
-        os.remove('getDataTEMP.csv')
-
-    return alldatadf
+###############################################################################
 
 
 @printstatus('Creating basic catalog summary')
@@ -362,19 +70,68 @@ def basic_cat_sum(catalog, dirname):
             sumfile.write(line)
 
 
+def largest_ten(catalog, dirname):
+    """Make a list of the 10 events with largest magnitude."""
+    catalog = catalog.sort_values(by='mag', ascending=False)
+    topten = catalog.head(n=10)
+    topten = topten[['time', 'id', 'latitude', 'longitude', 'depth', 'mag']]
+
+    with open('%s_largestten.txt' % dirname, 'w') as magfile:
+        for event in topten.itertuples():
+            line = ' '.join([str(x) for x in event[1:]]) + '\n'
+            magfile.write(line)
+
+
+@printstatus('Finding possible duplicates')
+def list_duplicates(catalog, dirname, timewindow=2, distwindow=2, minmag=-5,
+                    locfilter=None):
+    """Make a list of possible duplicate events."""
+    catalog.loc[:, 'convtime'] = [' '.join(x.split('T'))
+                                  for x in catalog['time'].tolist()]
+    catalog.loc[:, 'convtime'] = catalog['convtime'].astype('datetime64[ns]')
+    catalog = catalog[catalog['mag'] >= minmag]
+    if locfilter:
+        catalog = catalog[catalog['place'].str.contains(locfilter, na=False)]
+    cat = catalog[['convtime', 'id', 'latitude', 'longitude', 'depth', 'mag']]
+
+    duplines = []
+    for event in cat.itertuples():
+
+        trimdf = cat[cat['convtime'].between(event.convtime, event.convtime
+            + pd.Timedelta(seconds=timewindow), inclusive=False)]
+        if len(trimdf) != 0:
+            for tevent in trimdf.itertuples():
+                dist = gps2dist_azimuth(event.latitude, event.longitude,
+                            tevent.latitude, tevent.longitude)[0] / 1000.
+                if dist < distwindow:
+                    dupline1 = ' '.join([str(x) for x in event[1:]]) + '\n'
+                    dupline2 = ' '.join([str(x) for x in tevent[1:]]) + '\n'
+                    dupline3 = '-----------------------\n'
+                    duplines.extend((dupline1, dupline2, dupline3))
+            continue
+
+    with open('%s_duplicates.txt' % dirname, 'w') as dupfile:
+        for dupline in duplines:
+            dupfile.write(dupline)
+
+
 @printstatus('Mapping earthquake locations')
-def map_detecs(catalog, dirname, minmag=0, mindep=-50, title=''):
+def map_detecs(catalog, dirname, minmag=-5, mindep=-50, title=''):
     """Make scatter plot of detections with magnitudes (if applicable)."""
     catalog = catalog[(catalog['mag'] >= minmag)
                       & (catalog['depth'] >= mindep)].copy()
 
+    if len(catalog) == 0:
+        print('\nCatalog contains no events deeper than %s.' % mindep)
+        return
+
     # define map bounds
-    lllat, lllon, urlat, urlon, _, _, _, clon = get_map_bounds(catalog)
+    lllat, lllon, urlat, urlon, _, _, _, clon = qcu.get_map_bounds(catalog)
 
     plt.figure(figsize=(12, 7))
     mplmap = plt.axes(projection=ccrs.PlateCarree(central_longitude=clon))
     mplmap.set_extent([lllon, urlon, lllat, urlat], ccrs.PlateCarree())
-    mplmap.coastlines('50m')
+    mplmap.coastlines('50m', facecolor='none')
 
     # if catalog has magnitude data
     if not catalog['mag'].isnull().all():
@@ -402,15 +159,25 @@ def map_detecs(catalog, dirname, minmag=0, mindep=-50, title=''):
         lons, lats = list(catalog['longitude']), list(catalog['latitude'])
         mplmap.scatter(lons, lats, s=15, marker='x', c='r', zorder=10)
 
+    mplmap.add_feature(cfeature.NaturalEarthFeature('cultural',
+        'admin_1_states_provinces_lines', '50m', facecolor='none',
+        edgecolor='k', zorder=9))
+    mplmap.add_feature(cfeature.BORDERS)
+
     plt.title(title)
     plt.subplots_adjust(left=0.05, right=0.95, top=0.95, bottom=0.05)
 
-    plt.savefig('%s_mapdetecs.png' % dirname, dpi=300)
+    if mindep != -50:
+        plt.savefig('%s_morethan%sdetecs.png' % (dirname, mindep), dpi=300)
+    else:
+        plt.savefig('%s_mapdetecs.png' % dirname, dpi=300)
+
+    plt.close()
 
 
 @printstatus('Mapping earthquake density')
 def map_detec_nums(catalog, dirname, title='', numcolors=16, rmin=77, rmax=490,
-                   minmag=0, pltevents=True):
+                   minmag=-5, pltevents=True):
     """Map detections and a grid of detection density. rmax=510 is white,
     rmin=0 is black.
     """
@@ -418,17 +185,17 @@ def map_detec_nums(catalog, dirname, title='', numcolors=16, rmin=77, rmax=490,
     mask = catalog['mag'] >= minmag
 
     lllat, lllon, urlat, urlon, gridsize, hgridsize, _, clon = \
-        get_map_bounds(catalog[mask])
+        qcu.get_map_bounds(catalog[mask])
 
-    catalog = add_centers(catalog, gridsize)
-    groupedlatlons, _, cmax = group_lat_lons(catalog, minmag=minmag)
+    catalog = qcu.add_centers(catalog, gridsize)
+    groupedlatlons, _, cmax = qcu.group_lat_lons(catalog, minmag=minmag)
 
     # print message if there are no detections with magnitudes above minmag
     if cmax == 0:
         print("No detections over magnitude %s" % minmag)
 
     # create color gradient from light red to dark red
-    colors = range2rgb(rmin, rmax, numcolors)
+    colors = qcu.range2rgb(rmin, rmax, numcolors)
 
     # put each center into its corresponding color group
     colorgroups = list(np.linspace(0, cmax, numcolors))
@@ -465,7 +232,7 @@ def map_detec_nums(catalog, dirname, title='', numcolors=16, rmin=77, rmax=490,
 
         color = colors[cgroup-1]
 
-        draw_grid(glats, glons, color, alpha=0.8)
+        qcu.draw_grid(glats, glons, color, alpha=0.8)
 
     # if provided, plot detection epicenters
     if pltevents and not catalog['mag'].isnull().all():
@@ -479,16 +246,17 @@ def map_detec_nums(catalog, dirname, title='', numcolors=16, rmin=77, rmax=490,
         mplmap.scatter(lons, lats, c='k', s=7, marker='x', zorder=5)
 
     plt.savefig('%s_eqdensity.png' % dirname, dpi=300)
+    plt.close()
 
 
 @printstatus('Making histogram of given parameter')
 def make_hist(catalog, param, binsize, dirname, title='', xlabel='',
-              countlabel=False):
+              countlabel=False, maxval=None):
     """Plot histogram grouped by some parameter."""
     paramlist = catalog[pd.notnull(catalog[param])][param].tolist()
     minparam, maxparam = min(paramlist), max(paramlist)
-    paramdown = round2bin(minparam, binsize, 'down')
-    paramup = round2bin(maxparam, binsize, 'up')
+    paramdown = qcu.round2bin(minparam, binsize, 'down')
+    paramup = qcu.round2bin(maxparam, binsize, 'up')
     numbins = int((paramup-paramdown) / binsize)
     labelbuff = float(paramup-paramdown) / numbins * 0.5
 
@@ -497,7 +265,7 @@ def make_hist(catalog, param, binsize, dirname, title='', xlabel='',
     diffs = [round(x, 1) for x in diffs if x > 0]
 
     plt.figure(figsize=(10, 6))
-    plt.title(title)
+    plt.title(title, fontsize=20)
     plt.xlabel(xlabel, fontsize=14)
     plt.ylabel('Count', fontsize=14)
 
@@ -515,6 +283,8 @@ def make_hist(catalog, param, binsize, dirname, title='', xlabel='',
 
     plt.subplots_adjust(left=0.1, right=0.95, top=0.95, bottom=0.11)
 
+    if maxval:
+        plt.xlim(xmax=maxval)
     plt.ylim(0, maxbarheight*1.1+0.1)
 
     # put count numbers above the bars if countlabel=True
@@ -523,7 +293,12 @@ def make_hist(catalog, param, binsize, dirname, title='', xlabel='',
             plt.text(phist[1][i]+labelbuff, phist[0][i]+labely,
                      '%0.f' % phist[0][i], size=12, ha='center')
 
-    plt.savefig('%s_%shistogram.png' % (dirname, param), dpi=300)
+    if maxval:
+        plt.savefig('%s_zoom%shistogram.png' % (dirname, param), dpi=300)
+    else:
+        plt.savefig('%s_%shistogram.png' % (dirname, param), dpi=300)
+
+    plt.close()
 
 
 @printstatus('Making histogram of given time duration')
@@ -532,7 +307,7 @@ def make_time_hist(catalog, timelength, dirname, title=''):
     timelist = catalog['time']
 
     plt.figure(figsize=(10, 6))
-    plt.title(title)
+    plt.title(title, fontsize=20)
     plt.ylabel('Count', fontsize=14)
 
     if timelength == 'hour':
@@ -540,7 +315,7 @@ def make_time_hist(catalog, timelength, dirname, title=''):
         hours = np.linspace(-12, 12, 25).tolist()
 
         tlonlist = catalog.loc[:, ['longitude', 'time']]
-        tlonlist.loc[:, 'rLon'] = round2lon(tlonlist['longitude'])
+        tlonlist.loc[:, 'rLon'] = qcu.round2lon(tlonlist['longitude'])
 
         tlonlist.loc[:, 'hour'] = [int(x.split('T')[1].split(':')[0])
                                    for x in tlonlist['time']]
@@ -580,6 +355,7 @@ def make_time_hist(catalog, timelength, dirname, title=''):
     plt.subplots_adjust(left=0.1, right=0.95, top=0.95, bottom=0.11)
 
     plt.savefig('%s_%shistogram.png' % (dirname, timelength), dpi=300)
+    plt.close()
 
 
 @printstatus('Graphing mean time separation')
@@ -591,12 +367,12 @@ def graph_time_sep(catalog, dirname):
     catalog.loc[:, 'dt'] = catalog.convtime.diff().astype('timedelta64[ns]')
     catalog.loc[:, 'dtmin'] = catalog['dt'] / pd.Timedelta(minutes=1)
 
-    mindate = catalog['convtime'].min() - pd.Timedelta(days=15)
-    maxdate = catalog['convtime'].max() - pd.Timedelta(days=15)
+    mindate = catalog['convtime'].min()
+    maxdate = catalog['convtime'].max()
 
     fig = plt.figure(figsize=(10, 6))
     axfull = fig.add_subplot(111)
-    axfull.set_ylabel('Time separation (min)')
+    axfull.set_ylabel('Time separation (min)', fontsize=14, labelpad=20)
     axfull.spines['top'].set_color('none')
     axfull.spines['bottom'].set_color('none')
     axfull.spines['left'].set_color('none')
@@ -604,41 +380,127 @@ def graph_time_sep(catalog, dirname):
     axfull.tick_params(labelcolor='w', top='off', bottom='off',
                        left='off', right='off')
 
-    fig.add_subplot(311)
-    plt.plot(catalog['convtime'], catalog['dtmin'], alpha=1, color='b')
-    plt.xlabel('Date')
-    plt.title('Time separation between events')
-    plt.xlim(mindate+pd.Timedelta(days=15), maxdate)
-    plt.ylim(0)
+    if maxdate - mindate < pd.Timedelta(days=1460):
+        # time separation between events
+        fig.add_subplot(311)
+        plt.plot(catalog['convtime'], catalog['dtmin'], alpha=1, color='b')
+        plt.xlabel('Date')
+        plt.title('Time separation between events')
+        plt.xlim(mindate, maxdate)
+        plt.ylim(0)
 
-    fig.add_subplot(312)
-    month_max = catalog.resample('1M', on='convtime').max()['dtmin']
-    months = month_max.index.map(lambda x: x.strftime('%Y-%m')).tolist()
-    months = [date(int(x[:4]), int(x[-2:]), 1) for x in months]
-    plt.bar(months, month_max.tolist(), color='b', alpha=1, width=31)
-    plt.xlabel('Month')
-    plt.title('Maximum event separation by month')
-    plt.xlim(mindate, maxdate)
+        # maximum monthly time separation
+        fig.add_subplot(312)
+        month_max = catalog.resample('1M', on='convtime').max()['dtmin']
+        months = month_max.index.map(lambda x: x.strftime('%Y-%m')).tolist()
+        months = [date(int(x[:4]), int(x[-2:]), 1) for x in months]
+        plt.bar(months, month_max.tolist(), color='b', alpha=1, width=31)
+        plt.xlabel('Month')
+        plt.title('Maximum event separation by month')
+        plt.xlim(mindate - pd.Timedelta(days=15),
+                 maxdate - pd.Timedelta(days=16))
 
-    fig.add_subplot(313)
-    month_med = catalog.resample('1M', on='convtime').median()['dtmin']
-    plt.bar(months, month_med.tolist(), color='b', alpha=1, width=31)
-    plt.xlabel('Month')
-    plt.title('Median event separation by month')
-    plt.tight_layout()
-    plt.xlim(mindate, maxdate)
+        # median monthly time separation
+        fig.add_subplot(313)
+        month_med = catalog.resample('1M', on='convtime').median()['dtmin']
+        plt.bar(months, month_med.tolist(), color='b', alpha=1, width=31)
+        plt.xlabel('Month')
+        plt.title('Median event separation by month')
+        plt.tight_layout()
+        plt.xlim(mindate - pd.Timedelta(days=15),
+                 maxdate - pd.Timedelta(days=16))
+
+    else:
+        # time separation between events
+        fig.add_subplot(311)
+        plt.plot(catalog['convtime'], catalog['dtmin'], alpha=1, color='b')
+        plt.xlabel('Date')
+        plt.title('Time separation between events')
+        plt.xlim(mindate, maxdate)
+        plt.ylim(0)
+
+        # maximum yearly time separation
+        fig.add_subplot(312)
+        year_max = catalog.resample('1Y', on='convtime').max()['dtmin']
+        years = year_max.index.map(lambda x: x.strftime('%Y')).tolist()
+        years = [date(int(x[:4]), 1, 1) for x in years]
+        plt.bar(years, year_max.tolist(), color='b', alpha=1, width=365,
+                edgecolor='k')
+        plt.xlabel('Year')
+        plt.title('Maximum event separation by year')
+        plt.xlim(mindate - pd.Timedelta(days=183),
+                 maxdate - pd.Timedelta(days=183))
+
+        # median yearly time separation
+        fig.add_subplot(313)
+        year_med = catalog.resample('1Y', on='convtime').median()['dtmin']
+        plt.bar(years, year_med.tolist(), color='b', alpha=1, width=365,
+                edgecolor='k')
+        plt.xlabel('Year')
+        plt.title('Median event separation by year')
+        plt.tight_layout()
+        plt.xlim(mindate - pd.Timedelta(days=183),
+                 maxdate - pd.Timedelta(days=183))
 
     plt.savefig('%s_timeseparation.png' % dirname, dpi=300)
+    plt.close()
+
+
+@printstatus('Graphing median magnitude by time')
+def med_mag(catalog, dirname):
+    """Make a bar graph of median event magnitude by year."""
+    catalog.loc[:, 'convtime'] = [' '.join(x.split('T')).split('.')[0]
+                                  for x in catalog['time'].tolist()]
+    catalog.loc[:, 'convtime'] = catalog['convtime'].astype('datetime64[ns]')
+
+    mindate = catalog['convtime'].min()
+    maxdate = catalog['convtime'].max()
+
+    if maxdate - mindate < pd.Timedelta(days=1460):
+        month_max = catalog.resample('1M', on='convtime').max()['mag']
+        months = month_max.index.map(lambda x: x.strftime('%Y-%m')).tolist()
+        months = [date(int(x[:4]), int(x[-2:]), 1) for x in months]
+        month_medmag = catalog.resample('1M', on='convtime').median()['mag']
+
+        fig = plt.figure(figsize=(10, 6))
+        ax = fig.add_subplot(111)
+        ax.tick_params(bottom='off')
+        plt.bar(months, month_medmag.tolist(), color='b', edgecolor='k',
+                alpha=1, width=31)
+        plt.xlabel('Month', fontsize=14)
+        plt.ylabel('Magnitude', fontsize=14)
+        plt.title('Monthly Median Magnitude', fontsize=20)
+        plt.xlim(min(months) - pd.Timedelta(days=15),
+                 max(months) - pd.Timedelta(days=15))
+    else: 
+        year_max = catalog.resample('1Y', on='convtime').max()['mag']
+        years = year_max.index.map(lambda x: x.strftime('%Y')).tolist()
+        years = [date(int(x[:4]), 1, 1) for x in years]
+        year_medmag = catalog.resample('1Y', on='convtime').median()['mag']
+
+        fig = plt.figure(figsize=(10, 6))
+        ax = fig.add_subplot(111)
+        ax.tick_params(bottom='off')
+        plt.bar(years, year_medmag.tolist(), color='b', edgecolor='k', alpha=1,
+                width=365)
+        plt.xlabel('Year', fontsize=14)
+        plt.ylabel('Magnitude', fontsize=14)
+        plt.title('Yearly Median Magnitude', fontsize=20)
+        plt.xlim(min(years) - pd.Timedelta(days=183),
+                 max(years) - pd.Timedelta(days=183))
+    
+    plt.savefig('%s_yearlymedianmag' % dirname, dpi=300)
+    plt.close()
 
 
 @printstatus('Graphing magnitude completeness')
 def cat_mag_comp(catalog, dirname, magbin=0.1):
     """Plot catalog magnitude completeness."""
     catalog = catalog[pd.notnull(catalog['mag'])]
-    mags = np.array(catalog[catalog['mag'] > 0]['mag'])
+    mags = np.array(catalog['mag'])
     mags = np.around(mags, 1)
 
-    minmag, maxmag = 0, max(mags)
+    minmag, maxmag = min(min(mags), 0), max(mags)
 
     mag_centers = np.arange(minmag, maxmag + 2*magbin, magbin)
     cdf = np.zeros(len(mag_centers))
@@ -654,8 +516,8 @@ def cat_mag_comp(catalog, dirname, magbin=0.1):
     mc_est = mag_centers[idx]
 
     try:
-        mc_est, bvalue, avalue, lval, mc_bins, std_dev = WW2000(mc_est, mags,
-                                                                magbin)
+        mc_est, bvalue, avalue, lval, mc_bins, std_dev = qcu.WW2000(mc_est,
+            mags, magbin)
     except:
         mc_est = mc_est + 0.3
         mc_bins = np.arange(0, maxmag + magbin/2., magbin)
@@ -667,7 +529,7 @@ def cat_mag_comp(catalog, dirname, magbin=0.1):
         std_dev = bvalue/sqrt(len(mags[mags >= mc_est]))
 
     plt.figure(figsize=(8, 6))
-    plt.scatter(mag_centers[:-1], g_r, edgecolor='r', marker='o',
+    plt.scatter(mag_centers[:len(g_r)], g_r, edgecolor='r', marker='o',
                 facecolor='none', label='Incremental')
     plt.scatter(mag_centers, cdf, c='k', marker='+', label='Cumulative')
     plt.axvline(mc_est, c='r', linestyle='--', label='Mc = %2.1f' % mc_est)
@@ -677,7 +539,7 @@ def cat_mag_comp(catalog, dirname, magbin=0.1):
     ax1 = plt.gca()
     ax1.set_yscale('log')
     max_count = np.amax(cdf) + 100000
-    ax1.set_xlim([0, maxmag])
+    ax1.set_xlim([minmag, maxmag])
     ax1.set_ylim([1, max_count])
     plt.title('Frequency-Magnitude Distribution', fontsize=18)
     plt.xlabel('Magnitude', fontsize=14)
@@ -685,33 +547,35 @@ def cat_mag_comp(catalog, dirname, magbin=0.1):
     plt.legend(numpoints=1)
 
     plt.savefig('%s_catmagcomp.png' % dirname, dpi=300)
+    plt.close()
 
 
 @printstatus('Graphing magnitude versus time for each earthquake')
 def graph_mag_time(catalog, dirname):
     """Plot magnitudes vs. origin time."""
-    catalog = catalog[pd.notnull(catalog['mag']) & (catalog['mag'] > 0)]
+    catalog = catalog[pd.notnull(catalog['mag'])]
     catalog.loc[:, 'convtime'] = [' '.join(x.split('T')).split('.')[0]
                                   for x in catalog['time'].tolist()]
     catalog.loc[:, 'convtime'] = catalog['convtime'].astype('datetime64[ns]')
 
-    times = catalog['time']
-    mags = catalog['mag']
+    times = catalog['time'].copy()
+    mags = catalog['mag'].copy()
 
     plt.figure(figsize=(10, 6))
     plt.xlabel('Date', fontsize=14)
     plt.ylabel('Magnitude', fontsize=14)
     plt.plot_date(times, mags, alpha=0.7, markersize=2, c='b')
     plt.xlim(min(times), max(times))
-    plt.ylim(0)
+    plt.title('Magnitude vs. Time', fontsize=20)
 
     plt.savefig('%s_magvtime.png' % dirname, dpi=300)
+    plt.close()
 
 
 @printstatus('Graphing cumulative moment release')
 def cumul_moment_release(catalog, dirname):
     """Graph cumulative moment release."""
-    catalog = catalog[pd.notnull(catalog['mag']) & (catalog['mag'] > 0)]
+    catalog = catalog[pd.notnull(catalog['mag'])]
     catalog.loc[:, 'convtime'] = [' '.join(x.split('T')).split('.')[0]
                                   for x in catalog['time'].tolist()]
     catalog.loc[:, 'convtime'] = catalog['convtime'].astype('datetime64[ns]')
@@ -729,6 +593,7 @@ def cumul_moment_release(catalog, dirname):
     plt.ylabel(r'Cumulative Moment Release (N$\times$m)', fontsize=14)
     plt.xlim(minday, maxday)
     plt.ylim(0)
+    plt.title('Cumulative Moment Release', fontsize=20)
 
     colors = ['r', 'm', 'c', 'y', 'g']
     largesteqs = catalog.sort_values('mag').tail(5)
@@ -736,6 +601,7 @@ def cumul_moment_release(catalog, dirname):
         plt.axvline(x=eq.time, color=colors[i], linestyle='--')
 
     plt.savefig('%s_cumulmomentrelease.png' % dirname, dpi=300)
+    plt.close()
 
 
 @printstatus('Graphing cumulative event types')
@@ -754,8 +620,14 @@ def graph_event_types(catalog, dirname):
 
     plt.yscale('log')
     plt.legend()
+    plt.xlim(min(catalog['time']), max(catalog['time']))
+
+    plt.xlabel('Date', fontsize=14)
+    plt.ylabel('Cumulative number of events', fontsize=14)
+    plt.title('Cumulative Event Type', fontsize=20)
 
     plt.savefig('%s_cumuleventtypes.png' % dirname, dpi=300)
+    plt.close()
 
 
 @printstatus('Graphing possible number of duplicate events')
@@ -763,14 +635,14 @@ def cat_dup_search(catalog, dirname):
     """Graph possible number of duplicate events given various distances
     and time differences.
     """
-    epochtimes = [to_epoch(row.time) for row in catalog.itertuples()]
+    epochtimes = [qcu.to_epoch(row.time) for row in catalog.itertuples()]
     tdifsec = np.asarray(abs(np.diff(epochtimes)))
 
     lat1 = np.asarray(catalog.latitude[:-1])
     lon1 = np.asarray(catalog.longitude[:-1])
     lat2 = np.asarray(catalog.latitude[1:])
     lon2 = np.asarray(catalog.longitude[1:])
-    ddelkm = [eq_dist(lat1[i], lon1[i], lat2[i], lon2[i])
+    ddelkm = [gps2dist_azimuth(lat1[i], lon1[i], lat2[i], lon2[i])[0] / 1000.
               for i in range(len(lat1))]
 
     diffdf = pd.DataFrame({'tdifsec': tdifsec, 'ddelkm': ddelkm})
@@ -801,12 +673,15 @@ def cat_dup_search(catalog, dirname):
         plt.plot(times, matches, label=lab)
 
     plt.xlabel('Time (s)', fontsize=14)
-    plt.ylabel('Total Number of Events', fontsize=14)
+    plt.ylabel('Possible duplicate events', fontsize=14)
     plt.xlim(0, tmax)
     plt.ylim(0, np.amax(totmatch)+0.5)
     plt.legend(loc=2, numpoints=1)
+    plt.title(('Cumulative number of events within X seconds\n'
+               'and Z km (Z specified in legend)'), fontsize=20)
 
     plt.savefig('%s_catdupsearch.png' % dirname, dpi=300)
+    plt.close()
 
 
 ###############################################################################
@@ -860,7 +735,8 @@ def main():
             except OSError as exception:
                 if exception.errno != errno.EEXIST:
                     raise
-            datadf = get_data(catalog, startyear, endyear, write=True)
+            datadf = qcu.get_data(catalog, startyear=startyear,
+                                  endyear=endyear)
         else:
             # Python 2
             try:
@@ -872,7 +748,8 @@ def main():
                     except OSError as exception:
                         if exception.errno != errno.EEXIST:
                             raise
-                    datadf = get_data(catalog, startyear, endyear, write=True)
+                    datadf = qcu.get_data(catalog, startyear=startyear,
+                                          endyear=endyear)
             # Python 3
             except:
                 try:
@@ -883,7 +760,8 @@ def main():
                     except OSError as exception:
                         if exception.errno != errno.EEXIST:
                             raise
-                    datadf = get_data(catalog, startyear, endyear, write=True)
+                    datadf = qcu.get_data(catalog, startyear=startyear,
+                                          endyear=endyear)
 
     else:
         from shutil import copy2
@@ -900,7 +778,7 @@ def main():
 
     if len(datadf) == 0:
         sys.stdout.write(('Catalog has no data available for that time period.'
-                          ' Quitting...'))
+                          ' Quitting...\n'))
         sys.exit()
 
     datadf = datadf.sort_values(by='time').reset_index(drop=True)
@@ -908,31 +786,30 @@ def main():
 
     os.chdir(dirname)
     basic_cat_sum(datadf, dirname)
-    map_detecs(datadf, dirname)
-    plt.close()
-    map_detec_nums(datadf, dirname)
-    plt.close()
-    make_hist(datadf, 'mag', 0.1, dirname, xlabel='Magnitude')
-    plt.close()
-    make_hist(datadf, 'depth', 10, dirname, xlabel='Depth (km)')
-    plt.close()
-    make_hist(datadf, 'ms', 20, dirname, xlabel='Milliseconds')
-    plt.close()
-    make_time_hist(datadf, 'hour', dirname)
-    plt.close()
-    make_time_hist(datadf, 'day', dirname)
-    plt.close()
+    largest_ten(datadf, dirname)
+    list_duplicates(datadf, dirname, timewindow=16, distwindow=100)
+
+    # generate figures
+    map_detecs(datadf, dirname, title='Detection locations')
+    map_detecs(datadf, dirname, mindep=50, title='Detections deeper than 50km')
+    map_detec_nums(datadf, dirname, title='Detection density')
+    make_hist(datadf, 'mag', 0.1, dirname, xlabel='Magnitude',
+              title='Magnitude histogram')
+    make_hist(datadf, 'depth', 5, dirname, xlabel='Depth (km)',
+              title='Depth histogram')
+    make_hist(datadf, 'depth', 0.5, dirname, maxval=20, xlabel='Depth (km)',
+              title='Zoomed depth histogram')
+    make_hist(datadf, 'ms', 20, dirname, xlabel='Milliseconds',
+              title='Histogram of milliseconds')
+    make_time_hist(datadf, 'hour', dirname, title='Events per Hour of the Day')
+    make_time_hist(datadf, 'day', dirname, title='Events per Day')
     graph_time_sep(datadf, dirname)
-    plt.close()
     cat_mag_comp(datadf, dirname)
-    plt.close()
     graph_mag_time(datadf, dirname)
-    plt.close()
     cumul_moment_release(datadf, dirname)
-    plt.close()
     graph_event_types(datadf, dirname)
-    plt.close()
     cat_dup_search(datadf, dirname)
+    med_mag(datadf, dirname)
 
 
 if __name__ == '__main__':
