@@ -9,7 +9,6 @@ import argparse
 from datetime import datetime
 from math import sqrt, degrees, radians, sin, cos, atan2, pi
 
-import scipy.io
 from scipy import stats
 import numpy as np
 import pandas as pd
@@ -130,14 +129,8 @@ def match_events(cat1, cat2, otwindow=16, distwindow=100):
 
 @printstatus('Mapping events from both catalogs')
 def map_events(cat1, cat2, reg, dirname):
-    """Map catalog events only within the appropriate region."""
+    """Map catalog events."""
     lllat, lllon, urlat, urlon, _, _, _, clon = qcu.get_map_bounds(cat1, cat2)
-
-    regionmat = scipy.io.loadmat('../regions.mat')
-    regdict = {regionmat['region'][i][0][0]: x[0]
-               for i, x in enumerate(regionmat['coord'])}
-    regzone = regdict[reg]
-    reglons, reglats = [x[0] for x in regzone], [x[1] for x in regzone]
 
     cat1lons, cat1lats = cat1.longitude, cat1.latitude
     cat2lons, cat2lats = cat2.longitude, cat2.latitude
