@@ -333,7 +333,6 @@ def make_time_hist(catalog, timelength, dirname, title=''):
         plt.xlim(-0.5, 23.5)
 
     elif timelength == 'day':
-        eqdates, counts = [], []
         daylist = [x.split('T')[0] for x in timelist]
         daydf = pd.DataFrame({'date': daylist})
         daydf['date'] = daydf['date'].astype('datetime64[ns]')
@@ -341,9 +340,8 @@ def make_time_hist(catalog, timelength, dirname, title=''):
                                daydf['date'].dt.month,
                                daydf['date'].dt.day]).count()
 
-        for eqdate in daydf.itertuples():
-            eqdates.append(eqdate.Index)
-            counts.append(eqdate.date)
+        eqdates = daydf.index.tolist()
+        counts = daydf.date.tolist()
 
         eqdates = [date(x[0], x[1], x[2]) for x in eqdates]
         minday, maxday = min(eqdates), max(eqdates)
@@ -569,6 +567,59 @@ def graph_mag_time(catalog, dirname):
     plt.title('Magnitude vs. Time', fontsize=20)
 
     plt.savefig('%s_magvtime.png' % dirname, dpi=300)
+    plt.close()
+
+
+@printstatus('Graphing event count by date and magnitude')
+def graph_mag_count(catalog, dirname):
+    """Graph event count grouped by magnitude and by date."""
+    catalog.loc[:, 'convtime'] = [' '.join(x.split('T')).split('.')[0]
+                                  for x in catalog['time'].tolist()]
+    catalog.loc[:, 'convtime'] = catalog['convtime'].astype('datetime64[ns]')
+
+    mindate, maxdate = catalog['convtime'].min(), catalog['convtime'].max()
+    bincond = maxdate - mindate < pd.Timedelta(days=1460)
+    barwidth = 31 if bincond else 365
+    timedelt = pd.Timedelta(days=barwidth/2.)
+
+    minbin = qcu.round2bin(catalog['mag'].min(), 1, 'down')
+    maxbin = qcu.round2bin(catalog['mag'].max(), 1, 'up')
+    bins = np.arange(minbin, maxbin+0.1, 1)
+
+    catalog.loc[:, 'magbin'] = pd.cut(catalog['mag'], bins=bins, right=True)
+    maggroups = catalog['magbin'].sort_values().unique()
+
+    fig, axlist = plt.subplots(len(maggroups), sharex=True)
+    fig.set_size_inches(8, 10, forward=True)
+    for i, mbin in enumerate(maggroups):
+        trimcat = catalog[catalog['magbin'] == mbin]
+
+        datelist = [x.split('T')[0] for x in trimcat['time']]
+        datedf = pd.DataFrame({'date': datelist})
+        datedf['date'] = datedf['date'].astype('datetime64[ns]')
+
+        datedf = datedf.groupby([datedf['date'].dt.year,
+                 datedf['date'].dt.month]).count() if bincond\
+                 else datedf.groupby([datedf['date'].dt.year]).count()
+
+        evdates = datedf.index.tolist()
+        counts = datedf.date.tolist()
+
+        evdates = [date(x[0], x[1], 1) if bincond else date(x, 1, 1)
+                   for x in evdates]
+
+        axlist[i].bar(evdates, counts, alpha=1, color='b', width=barwidth,
+                      edgecolor='k')
+        axlist[i].set_ylabel('%d-%d' % (bins[i], bins[i+1]), fontsize=10)
+        plt.xlim(mindate - timedelt, maxdate - timedelt)
+        plt.ylim(0, max(counts))
+        axlist[i].get_yaxis().set_label_coords(-0.1, 0.5)
+
+    plt.xlabel('Date', fontsize=14)
+    for ax in axlist[:-1]:
+        ax.xaxis.set_ticks_position('none')
+
+    plt.savefig('%s_magtimecount.png' % dirname, dpi=300)
     plt.close()
 
 
@@ -810,6 +861,7 @@ def main():
     graph_event_types(datadf, dirname)
     cat_dup_search(datadf, dirname)
     med_mag(datadf, dirname)
+    graph_mag_count(datadf, dirname)
 
 
 if __name__ == '__main__':
