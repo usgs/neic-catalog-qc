@@ -9,6 +9,7 @@ import argparse
 from datetime import date, datetime
 from math import sqrt, radians, cos
 
+import markdown
 import numpy as np
 import pandas as pd
 import cartopy.crs as ccrs
@@ -35,7 +36,7 @@ from decorators import retry, printstatus
 
 
 @printstatus('Creating basic catalog summary')
-def basic_cat_sum(catalog, dirname):
+def basic_cat_sum(catalog, dirname, dup1, dup2, timewindow, distwindow):
     """Gather basic catalog summary statistics."""
     lines = []
 
@@ -62,8 +63,13 @@ def basic_cat_sum(catalog, dirname):
     lines.append('Maximum magnitude: %s\n' % catalog['mag'].max())
     lines.append('Number of 0 magnitude events: %s\n'
                  % len(catalog[catalog['mag'] == 0]))
-    lines.append('Number of NaN magnitude events: %s'
+    lines.append('Number of NaN magnitude events: %s\n\n'
                  % len(catalog[pd.isnull(catalog['mag'])]))
+
+    lines.append('Number of possible duplicates (%ss and %skm threshold): %d\n'
+                 % (timewindow, distwindow, dup1))
+    lines.append('Number of possible duplicates (16s and 100km threshold): %d'
+                 % dup2)
 
     with open('%s_catalogsummary.txt' % dirname, 'w') as sumfile:
         for line in lines:
@@ -83,36 +89,60 @@ def largest_ten(catalog, dirname):
 
 
 @printstatus('Finding possible duplicates')
-def list_duplicates(catalog, dirname, timewindow=2, distwindow=2, minmag=-5,
-                    locfilter=None):
+def list_duplicates(catalog, dirname, timewindow=2, distwindow=15,
+                    magwindow=None, minmag=-5, locfilter=None):
     """Make a list of possible duplicate events."""
     catalog.loc[:, 'convtime'] = [' '.join(x.split('T'))
-                                  for x in catalog['time'].tolist()]
+                               for x in catalog['time'].tolist()]
     catalog.loc[:, 'convtime'] = catalog['convtime'].astype('datetime64[ns]')
     catalog = catalog[catalog['mag'] >= minmag]
     if locfilter:
         catalog = catalog[catalog['place'].str.contains(locfilter, na=False)]
     cat = catalog[['convtime', 'id', 'latitude', 'longitude', 'depth', 'mag']]
 
-    duplines = []
+    duplines1 = [('Possible duplicates using %ss time threshold and %skm '
+                  'distance threshold\n') % (timewindow, distwindow),
+                 '***********************\n']
+    duplines2 = [('\n\nPossible duplicates using 16s time threshold and 100km '
+                  'distance threshold\n'),
+                 '***********************\n']
+
+    thresh1dupes, thresh2dupes = 0, 0
     for event in cat.itertuples():
 
         trimdf = cat[cat['convtime'].between(event.convtime, event.convtime
-            + pd.Timedelta(seconds=timewindow), inclusive=False)]
+                 + pd.Timedelta(seconds=16), inclusive=False)]
+
         if len(trimdf) != 0:
             for tevent in trimdf.itertuples():
                 dist = gps2dist_azimuth(event.latitude, event.longitude,
                             tevent.latitude, tevent.longitude)[0] / 1000.
-                if dist < distwindow:
-                    dupline1 = ' '.join([str(x) for x in event[1:]]) + '\n'
-                    dupline2 = ' '.join([str(x) for x in tevent[1:]]) + '\n'
-                    dupline3 = '-----------------------\n'
-                    duplines.extend((dupline1, dupline2, dupline3))
+                if dist < 100:
+                    dtime = (event.convtime - tevent.convtime).total_seconds()
+                    dmag = event.mag - tevent.mag
+                    diffs = map('{:.2f}'.format, [dtime, dist, dmag])
+
+                    dupline1 = '-----------------------\n'
+                    dupline2 = ' '.join([str(x) for x in event[1:]]) + ' ' +\
+                               ' '.join(diffs) + '\n'
+                    dupline3 = ' '.join([str(x) for x in tevent[1:]]) + '\n'
+                    duplines2.extend((dupline1, dupline2, dupline3))
+
+                    thresh2dupes += 1
+
+                    if (dist < distwindow) and (abs(dtime) < timewindow):
+                        duplines1.extend((dupline1, dupline2, dupline3))
+                        thresh1dupes += 1
+
             continue
 
     with open('%s_duplicates.txt' % dirname, 'w') as dupfile:
-        for dupline in duplines:
+        for dupline in duplines1:
             dupfile.write(dupline)
+        for dupline in duplines2:
+            dupfile.write(dupline)
+
+    return thresh1dupes, thresh2dupes
 
 
 @printstatus('Mapping earthquake locations')
@@ -164,7 +194,7 @@ def map_detecs(catalog, dirname, minmag=-5, mindep=-50, title=''):
         edgecolor='k', zorder=9))
     mplmap.add_feature(cfeature.BORDERS)
 
-    plt.title(title)
+    plt.title(title, fontsize=20)
     plt.subplots_adjust(left=0.05, right=0.95, top=0.95, bottom=0.05)
 
     if mindep != -50:
@@ -207,6 +237,10 @@ def map_detec_nums(catalog, dirname, title='', numcolors=16, rmin=77, rmax=490,
     mplmap = plt.axes(projection=ccrs.PlateCarree(central_longitude=clon))
     mplmap.set_extent([lllon, urlon, lllat, urlat], ccrs.PlateCarree())
     mplmap.coastlines('50m')
+    mplmap.add_feature(cfeature.BORDERS)
+    mplmap.add_feature(cfeature.NaturalEarthFeature('cultural',
+        'admin_1_states_provinces_lines', '50m', facecolor='none',
+        edgecolor='k', zorder=9))
     plt.title(title, fontsize=20)
     plt.subplots_adjust(left=0.01, right=0.9, top=0.95, bottom=0.05)
 
@@ -275,7 +309,7 @@ def make_hist(catalog, param, binsize, dirname, title='', xlabel='',
     else:
         parambins = np.linspace(paramdown, paramup+binsize,
                                 numbins+2) - binsize/2.
-        plt.xlim(paramdown+binsize/2., paramup+binsize/2.)
+        plt.xlim(paramdown-binsize/2., paramup+binsize/2.)
 
     phist = plt.hist(paramlist, parambins, alpha=0.7, color='b', edgecolor='k')
     maxbarheight = max([phist[0][x] for x in range(numbins)] or [0])
@@ -328,7 +362,7 @@ def make_time_hist(catalog, timelength, dirname, title=''):
         hourlist = tlonlist.rhour.tolist()
         hourbins = np.linspace(-0.5, 23.5, 25)
 
-        plt.hist(hourlist, hourbins, alpha=0.7, color='b', edgecolor='k')
+        plt.hist(hourlist, hourbins, alpha=1, color='b', edgecolor='k')
         plt.xlabel('Hour of the Day', fontsize=14)
         plt.xlim(-0.5, 23.5)
 
@@ -392,7 +426,8 @@ def graph_time_sep(catalog, dirname):
         month_max = catalog.resample('1M', on='convtime').max()['dtmin']
         months = month_max.index.map(lambda x: x.strftime('%Y-%m')).tolist()
         months = [date(int(x[:4]), int(x[-2:]), 1) for x in months]
-        plt.bar(months, month_max.tolist(), color='b', alpha=1, width=31)
+        plt.bar(months, month_max.tolist(), color='b', alpha=1, width=31,
+                edgecolor='k')
         plt.xlabel('Month')
         plt.title('Maximum event separation by month')
         plt.xlim(mindate - pd.Timedelta(days=15),
@@ -401,7 +436,8 @@ def graph_time_sep(catalog, dirname):
         # median monthly time separation
         fig.add_subplot(313)
         month_med = catalog.resample('1M', on='convtime').median()['dtmin']
-        plt.bar(months, month_med.tolist(), color='b', alpha=1, width=31)
+        plt.bar(months, month_med.tolist(), color='b', alpha=1, width=31,
+                edgecolor='k')
         plt.xlabel('Month')
         plt.title('Median event separation by month')
         plt.tight_layout()
@@ -469,7 +505,7 @@ def med_mag(catalog, dirname):
         plt.ylabel('Magnitude', fontsize=14)
         plt.title('Monthly Median Magnitude', fontsize=20)
         plt.xlim(min(months) - pd.Timedelta(days=15),
-                 max(months) - pd.Timedelta(days=15))
+                 max(months) + pd.Timedelta(days=15))
     else: 
         year_max = catalog.resample('1Y', on='convtime').max()['mag']
         years = year_max.index.map(lambda x: x.strftime('%Y')).tolist()
@@ -487,7 +523,7 @@ def med_mag(catalog, dirname):
         plt.xlim(min(years) - pd.Timedelta(days=183),
                  max(years) - pd.Timedelta(days=183))
     
-    plt.savefig('%s_yearlymedianmag' % dirname, dpi=300)
+    plt.savefig('%s_medianmag' % dirname, dpi=300)
     plt.close()
 
 
@@ -582,17 +618,21 @@ def graph_mag_count(catalog, dirname):
     barwidth = 31 if bincond else 365
     timedelt = pd.Timedelta(days=barwidth/2.)
 
-    minbin = qcu.round2bin(catalog['mag'].min(), 1, 'down')
-    maxbin = qcu.round2bin(catalog['mag'].max(), 1, 'up')
+    minbin = qcu.round2bin(catalog['mag'].min()-0.1, 1, 'down')
+    maxbin = qcu.round2bin(catalog['mag'].max()+0.1, 1, 'up')
     bins = np.arange(minbin, maxbin+0.1, 1)
 
     catalog.loc[:, 'magbin'] = pd.cut(catalog['mag'], bins=bins, right=True)
     maggroups = catalog['magbin'].sort_values().unique()
 
     fig, axlist = plt.subplots(len(maggroups), sharex=True)
-    fig.set_size_inches(8, 10, forward=True)
+    fig.set_size_inches(10, 14, forward=True)
     for i, mbin in enumerate(maggroups):
+
         trimcat = catalog[catalog['magbin'] == mbin]
+
+        if len(trimcat) == 0:
+            continue
 
         datelist = [x.split('T')[0] for x in trimcat['time']]
         datedf = pd.DataFrame({'date': datelist})
@@ -740,7 +780,7 @@ def cat_dup_search(catalog, dirname):
 ###############################################################################
 
 
-def main():
+def create_figures():
     """Main function. Command line arguments defined here."""
     parser = argparse.ArgumentParser()
 
@@ -753,6 +793,10 @@ def main():
                         help='pick end year (to get a single year of data, \
                         enter same year as startyear)')
 
+    parser.add_argument('-tw', '--timewindow', type=float, default=2,
+                        help='change time window for finding duplicates')
+    parser.add_argument('-dw', '--distwindow', type=float, default=15,
+                        help='change distance window for finding duplicates')
     parser.add_argument('-sf', '--specifyfile', type=str,
                         help='specify existing .csv file to use')
     parser.add_argument('-fd', '--forcedownload', action='store_true',
@@ -832,13 +876,17 @@ def main():
                           ' Quitting...\n'))
         sys.exit()
 
+    timewindow = args.timewindow
+    distwindow = args.distwindow
+
     datadf = datadf.sort_values(by='time').reset_index(drop=True)
     datadf.loc[:, 'ms'] = datadf['time'].str[-4:-1].astype('float')
 
     os.chdir(dirname)
-    basic_cat_sum(datadf, dirname)
+    dup1, dup2 = list_duplicates(datadf, dirname, timewindow=timewindow,
+                                 distwindow=distwindow)
+    basic_cat_sum(datadf, dirname, dup1, dup2, timewindow, distwindow)
     largest_ten(datadf, dirname)
-    list_duplicates(datadf, dirname, timewindow=16, distwindow=100)
 
     # generate figures
     map_detecs(datadf, dirname, title='Detection locations')
@@ -846,7 +894,7 @@ def main():
     map_detec_nums(datadf, dirname, title='Detection density')
     make_hist(datadf, 'mag', 0.1, dirname, xlabel='Magnitude',
               title='Magnitude histogram')
-    make_hist(datadf, 'depth', 5, dirname, xlabel='Depth (km)',
+    make_hist(datadf, 'depth', 1, dirname, xlabel='Depth (km)',
               title='Depth histogram')
     make_hist(datadf, 'depth', 0.5, dirname, maxval=20, xlabel='Depth (km)',
               title='Zoomed depth histogram')
@@ -863,11 +911,98 @@ def main():
     med_mag(datadf, dirname)
     graph_mag_count(datadf, dirname)
 
+    return dirname
+
+
+def generate_html(dirname):
+    """Generate an HTML file containing all of the generated images and text
+    files."""
+    catalog = dirname[:-9].upper()
+    startyear = dirname[-9:-5]
+    endyear = dirname[-4:]
+
+    with open('{0}_catalogsummary.txt'.format(dirname)) as sumfile:
+        catsum = '\t\t' + '\n\t\t'.join(sumfile.readlines())
+    with open('{0}_largestten.txt'.format(dirname)) as tenfile:
+        largest = '\t\t' + '\n\t\t'.join(tenfile.readlines())
+    with open('{0}_duplicates.txt'.format(dirname)) as dupfile:
+        duplist = '\t\t' + '\n\t\t'.join(dupfile.readlines())
+    
+    toc = ('## Contents\n'
+           '- [Basic Catalog Summary](#catsum)\n'
+           '- [Seismicity Map](#seismap)\n'
+           '- [Seismicity Density Map](#densmap)\n'
+           '- [Depth Distribution](#dephist)\n'
+           '- [Event Frequency](#evfreq)\n'
+           '- [Hourly Event Frequency](#hrevfreq)\n'
+           '- [Millisecond Precision](#msprec)\n'
+           '- [Inter-Event Temporal Spacing](#tmsep)\n'
+           '- [Magnitude Distribution](#magdist)\n'
+           '    - [All Magnitudes](#allmag)\n'
+           '    - [All Magnitudes Histogram](#allmaghist)\n'
+           '    - [Magnitude & Event Count](#magevcount)\n'
+           '    - [Median Magnitudes](#medmag)\n'
+           '    - [Overall Completeness](#magcomp)\n'
+           '- [Cumulative Moment Release](#cumulrel)\n'
+           '- [Event Type Frequency](#evtypes)\n'
+           '- [Largest Events](#bigevs)\n'
+           '- [Searching for Duplicate Events](#dupgraph)\n'
+           '- [Possible Duplicate Events](#duplist)\n---\n')
+
+    mdstring = ('# Report for {1} catalog from {2} to {3}\n'
+                '### Basic Catalog Summary <a name="catsum"></a>\n---\n'
+                '{4}\n'
+                '### Seismicity Map <a name="seismap"></a>\n---\n'
+                '<img width="50%" src="{0}_mapdetecs.png">\n'
+                '### Seismicity Density Plot <a name="densmap"></a>\n---\n'
+                '<img width="50%" src="{0}_eqdensity.png">\n'
+                '### Depth Distribution <a name="dephist"></a>\n---\n'
+                '<img width="50%" src="{0}_depthhistogram.png">\n'
+                '<img width="50%" src="{0}_zoomdepthhistogram.png">\n'
+                '<img width="50%" src="{0}_morethan50detecs.png">\n'
+                '### Event Frequency <a name="evfreq"></a>\n---\n'
+                '<img width="50%" src="{0}_dayhistogram.png">\n'
+                '### Hourly Event Frequency <a name="hrevfreq"></a>\n---\n'
+                '<img width="50%" src="{0}_hourhistogram.png">\n'
+                '### Millisecond Precision <a name="msprec"></a>\n---\n'
+                '<img width="50%" src="{0}_mshistogram.png">\n'
+                '### Inter-Event Temporal Spacing <a name="tmsep"></a>\n---\n'
+                '<img width="50%" src="{0}_timeseparation.png">\n'
+                '## Magnitude Distribution <a name="magdist"></a>\n'
+                '### All Magnitudes <a name="allmag"></a>\n---\n'
+                '<img width="50%" src="{0}_magvtime.png">\n'
+                '### All Magnitudes Histogram <a name="allmaghist"></a>\n---\n'
+                '<img width="50%" src="{0}_maghistogram.png">\n'
+                '### Magnitude & Event Count <a name="magevcount"></a>\n---\n'
+                '<img width="50%" src="{0}_magtimecount.png">\n'
+                '### Median Magnitudes <a name="medmag"></a>\n---\n'
+                '<img width="50%" src="{0}_medianmag.png">\n'
+                '### Overall Completeness <a name="magcomp"></a>\n---\n'
+                '<img width="50%" src="{0}_catmagcomp.png">\n'
+                '### Cumulative Moment Release <a name="cumulrel"></a>\n---\n'
+                '<img width="50%" src="{0}_cumulmomentrelease.png">\n'
+                '### Event Type Frequency <a name="evtypes"></a>\n---\n'
+                '<img width="50%" src="{0}_cumuleventtypes.png">\n'
+                '### Largest Events <a name="bigevs"></a>\n---\n'
+                '{5}\n'
+                '### Finding Duplicate Events <a name="dupgraph"></a>\n---\n'
+                '<img width="50%" src="{0}_catdupsearch.png">\n'
+                '### Possible Duplicate Events <a name="duplist"></a>\n---\n'
+                '{6}'
+               ).format(dirname, catalog, startyear, endyear, catsum, largest,
+                        duplist)
+
+    html = markdown.markdown(toc+mdstring)
+
+    with open('{0}_report.html'.format(dirname), 'w') as htmlfile:
+        htmlfile.write(html)
+
 
 if __name__ == '__main__':
 
     try:
-        main()
+        dirname = create_figures()
+        generate_html(dirname)
     except (KeyboardInterrupt, SystemError):
         sys.stdout.write('\nProgram canceled. Exiting...\n')
         sys.exit()
