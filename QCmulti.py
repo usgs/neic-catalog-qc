@@ -38,7 +38,7 @@ def basic_cat_sum(catalog, catname, dirname):
     """Gather basic catalog summary statistics."""
     lines = []
 
-    lines.append('Catalog name: %s\n\n' % dirname[:-9].upper())
+    lines.append('Catalog name: %s\n\n' % catname.upper())
 
     lines.append('First date in catalog: %s\n' % catalog['time'].min())
     lines.append('Last date in catalog: %s\n\n' % catalog['time'].max())
@@ -107,19 +107,21 @@ def match_events(cat1, cat2, otwindow=16, distwindow=100):
 
         if len(cat2ix) != 0:
 
-            carr = np.array([gps2dist_azimuth(cat1.ix[i]['latitude'],
+            carr1 = np.array([gps2dist_azimuth(cat1.ix[i]['latitude'],
                 cat1.ix[i]['longitude'], cat2.ix[x]['latitude'],
                 cat2.ix[x]['longitude'])[0] / 1000. for x in cat2ix])
+            carr2 = np.array([abs(cat1.ix[i]['time'] - cat2.ix[x]['time'])
+                              for x in cat2ix])
+            carr3 = carr1 + 5*carr2
 
-            inds = np.where(carr < distwindow)[0]
+            ind = np.argmin(carr3)
 
-            if len(inds) != 0:
-                for ind in inds:
-                    cat1id = cat1.ix[i]['id']
-                    cat2id = cat2.ix[cat2ix[ind]]['id']
+            if (carr1[ind] < distwindow) and (carr2[ind] < otwindow):
+                cat1id = cat1.ix[i]['id']
+                cat2id = cat2.ix[cat2ix[ind]]['id']
 
-                    cat1ids.append(cat1id)
-                    cat2ids.append(cat2id)
+                cat1ids.append(cat1id)
+                cat2ids.append(cat2id)
 
     cat1matched = cat1[cat1['id'].isin(cat1ids)].reset_index(drop=True)
     cat2matched = cat2[cat2['id'].isin(cat2ids)].reset_index(drop=True)
@@ -128,17 +130,29 @@ def match_events(cat1, cat2, otwindow=16, distwindow=100):
 
 
 @printstatus('Mapping events from both catalogs')
-def map_events(cat1, cat2, reg, dirname):
-    """Map catalog events."""
+def map_events(cat1, cat2, cat1mids, cat2mids, dirname):
+    """Map matching events between catalogs."""
     lllat, lllon, urlat, urlon, _, _, _, clon = qcu.get_map_bounds(cat1, cat2)
 
-    cat1lons, cat1lats = cat1.longitude, cat1.latitude
-    cat2lons, cat2lats = cat2.longitude, cat2.latitude
+    cat1lons, cat1lats, cat2lons, cat2lats = [], [], [], []
+    for i, mid in enumerate(cat1mids):
+        cat1lons.append(cat1[cat1['id'] == mid]['longitude'].get_values()[0])
+        cat1lats.append(cat1[cat1['id'] == mid]['latitude'].get_values()[0])
+        cat2lons.append(cat2[cat2['id'] == cat2mids[i]]['longitude'
+                            ].get_values()[0])
+        cat2lats.append(cat2[cat2['id'] == cat2mids[i]]['latitude'
+                            ].get_values()[0])
 
     plt.figure(figsize=(12, 7))
-    mplmap = plt.axes(projection=ccrs.Robinson(central_longitude=clon))
+    mplmap = plt.axes(projection=ccrs.PlateCarree(central_longitude=clon))
     mplmap.set_extent([lllon, urlon, lllat, urlat], ccrs.PlateCarree())
     mplmap.coastlines('50m')
+    mplmap.gridlines(crs=ccrs.PlateCarree(), draw_labels=True,
+                     linewidth=1, color='gray', alpha=0.5, linestyle='--')
+
+    for i, lat in enumerate(cat1lats):
+        mplmap.plot([cat1lons[i], cat2lons[i]], [lat, cat2lats[i]],
+                    color='k', transform=ccrs.PlateCarree())
 
     mplmap.scatter(cat1lons, cat1lats, color='b', s=2, zorder=4,
                    transform=ccrs.PlateCarree())
@@ -153,13 +167,33 @@ def map_events(cat1, cat2, reg, dirname):
     plt.close()
 
 
+@printstatus('Mapping unassociated events')
+def map_unique_events(cat, catname, mids):
+    """Map unassociated events from a catalog."""
+    cat = cat[~cat['id'].isin(mids)].reset_index(drop=True)
+    lllat, lllon, urlat, urlon, _, _, _, clon = qcu.get_map_bounds(cat)
+
+    plt.figure(figsize=(12, 7))
+    mplmap = plt.axes(projection=ccrs.PlateCarree(central_longitude=clon))
+    mplmap.coastlines('50m')
+    mplmap.scatter(cat['longitude'].tolist(), cat['latitude'].tolist(),
+                   color='r', s=2, zorder=4, transform=ccrs.PlateCarree())
+    mplmap.gridlines(crs=ccrs.PlateCarree(), draw_labels=True,
+                     linewidth=1, color='gray', alpha=0.5, linestyle='--')
+    mplmap.add_feature(cfeature.NaturalEarthFeature('cultural',
+        'admin_1_states_provinces_lines', '50m', facecolor='none',
+        edgecolor='k', zorder=9))
+    mplmap.add_feature(cfeature.BORDERS)
+
+    plt.savefig('%s_uniquedetecs.png' % catname, dpi=300)
+    plt.close()
+
+
 @printstatus('Graphing polar histogram of azimuths and distances')
-def make_az_dist(cat1, cat2, cat1mids, cat2mids, dirname,
+def make_az_dist(cat1, cat1name, cat2, cat2name, cat1mids, cat2mids, dirname,
                  distwindow=100, numbins=16):
     """Make polar scatter/histogram of azimuth vs. distance."""
     azimuths, distances = qcu.get_azs_and_dists(cat1, cat2, cat1mids, cat2mids)
-
-    cat1name, cat2name = dirname[0:2].upper(), dirname[3:5].upper()
 
     width = 2*pi / numbins
     razimuths = list(map(radians, azimuths))
@@ -190,13 +224,14 @@ def make_az_dist(cat1, cat2, cat1mids, cat2mids, dirname,
 
 
 @printstatus('Comparing parameters of matched events')
-def compare_params(cat1, cat2, cat1mids, cat2mids, param, dirname):
+def compare_params(cat1, cat1name, cat2, cat2name, cat1mids, cat2mids, param,
+                   dirname):
     """Compare parameters of matched events."""
     cat1params, cat2params = [], []
 
-    for idx, eid in enumerate(cat1mids):
+    for ix, eid in enumerate(cat1mids):
         param1 = float(cat1[cat1['id'] == eid][param])
-        param2 = float(cat2[cat2['id'] == cat2mids[idx]][param])
+        param2 = float(cat2[cat2['id'] == cat2mids[ix]][param].get_values()[0])
 
         cat1params.append(param1)
         cat2params.append(param2)
@@ -208,7 +243,6 @@ def compare_params(cat1, cat2, cat1mids, cat2mids, param, dirname):
     linegraph = [mval*x + bval for x in cat1params]
     r2val = rval*rval
 
-    cat1name, cat2name = dirname[0:2].upper(), dirname[3:5].upper()
     aparam = param if param != 'mag' else 'magnitude'
     tparam = aparam.capitalize()
 
@@ -238,12 +272,24 @@ def make_diff_hist(cat1, cat2, cat1mids, cat2mids, param, binsize, dirname,
     for idx, eid in enumerate(cat1mids):
         c1mask = cat1['id'] == eid
         c2mask = cat2['id'] == cat2mids[idx]
-        cat1param = cat1[c1mask][param].values[0]
-        cat2param = cat2[c2mask][param].values[0]
-        pardiff = cat1param - cat2param
-        paramdiffs.append(pardiff)
 
-    minpardiff, maxpardiff = min(paramdiffs or [0]), max(paramdiffs or [0])
+        if param == 'distance':
+            cat1lat = cat1[c1mask]['latitude'].values[0]
+            cat1lon = cat1[c1mask]['longitude'].values[0]
+            cat2lat = cat2[c2mask]['latitude'].values[0]
+            cat2lon = cat2[c2mask]['longitude'].values[0]
+            pardiff = gps2dist_azimuth(cat1lat, cat1lon, cat2lat, cat2lon
+                                      )[0] / 1000.
+            paramdiffs.append(pardiff)
+        else:
+            cat1param = cat1[c1mask][param].values[0]
+            cat2param = cat2[c2mask][param].values[0]
+            if np.isnan(cat1param) or np.isnan(cat2param):
+                continue
+            pardiff = cat1param - cat2param
+            paramdiffs.append(pardiff)
+
+    minpardiff, maxpardiff = min(paramdiffs), max(paramdiffs)
     pardiffdown = qcu.round2bin(minpardiff, binsize, 'down')
     pardiffup = qcu.round2bin(maxpardiff, binsize, 'up')
     numbins = int((pardiffup-pardiffdown) / binsize)
@@ -255,11 +301,11 @@ def make_diff_hist(cat1, cat2, cat1mids, cat2mids, param, binsize, dirname,
     plt.xlabel(xlabel, fontsize=14)
     plt.ylabel('Count', fontsize=14)
 
-    plt.hist(paramdiffs, pardiffbins, alpha=0.7, color='b', edgecolor='k')
+    plt.hist(paramdiffs, pardiffbins, alpha=1, color='b', edgecolor='k')
 
     plt.subplots_adjust(left=0.1, right=0.95, top=0.95, bottom=0.11)
     plt.tick_params(labelsize=12)
-    plt.xlim(pardiffdown+binsize/2., pardiffup+binsize/2.)
+    plt.xlim(pardiffdown-binsize/2., pardiffup+binsize/2.)
     plt.ylim(0)
 
     plt.savefig('%s_%sdiffs.png' % (dirname, param), dpi=300)
@@ -276,14 +322,18 @@ def main():
     parser = argparse.ArgumentParser()
 
     parser.add_argument('catalog1', nargs='?', type=str,
-                        help='pick first catalog to download data from')
+                        help='pick first catalog to download data from; if \
+                        using -sf, give catalog name')
     parser.add_argument('catalog2', nargs='?', type=str,
-                        help='pick second catalog to download data from')
+                        help='pick second catalog to download data from; if \
+                        using -sf, give catalog name')
     parser.add_argument('startyear', nargs='?', type=int,
-                        help='pick starting year')
+                        help='pick starting year; if using -sf, give first \
+                        year in catalog')
     parser.add_argument('endyear', nargs='?', type=int,
                         help='pick end year (to get a single year of data, \
-                        enter same year as startyear)')
+                        enter same year as startyear); if using -sf, give \
+                        last year in catalog')
 
     parser.add_argument('-sf', '--specifyfiles', nargs=2, type=str,
                         help='specify two existing .csv files to use')
@@ -356,10 +406,10 @@ def main():
 
     else:
         from shutil import copy2
+
         sfcat1, sfcat2 = args.specifyfiles
-        cat1, cat2 = sfcat1.split('/')[-1][:-13], sfcat2.split('/')[-1][:-13]
-        dirname = '_'.join(['.'.join(sfcat1.split('.')[:-1]).split('/')[-1],
-                            '.'.join(sfcat2.split('.')[:-1]).split('/')[-1]])
+        cat1, cat2 = args.catalog1, args.catalog2
+        dirname = '%s-%s%s-%s' % (cat1, cat2, args.startyear, args.endyear)
 
         try:
             os.makedirs(dirname)
@@ -387,18 +437,25 @@ def main():
     comp_criteria(datadf1, datadf2, dirname, cat1.upper())
     cat1ids, cat2ids, newcat1, newcat2 = match_events(datadf1, datadf2)
 
-    map_events(newcat1, newcat2, cat1.upper(), dirname)
-    make_az_dist(newcat1, newcat2, cat1ids, cat2ids, dirname)
-    compare_params(newcat1, newcat2, cat1ids, cat2ids, 'mag', dirname)
-    compare_params(newcat1, newcat2, cat1ids, cat2ids, 'depth', dirname)
+    map_events(newcat1, newcat2, cat1ids, cat2ids, dirname)
+    map_unique_events(datadf1, cat1, cat1ids)
+    map_unique_events(datadf2, cat2, cat2ids)
+    make_az_dist(newcat1, cat1, newcat2, cat2, cat1ids, cat2ids, dirname)
+    compare_params(newcat1, cat1, newcat2, cat2, cat1ids, cat2ids, 'mag',
+                   dirname)
+    compare_params(newcat1, cat1, newcat2, cat2, cat1ids, cat2ids, 'depth',
+                   dirname)
     make_diff_hist(newcat1, newcat2, cat1ids, cat2ids, 'time', 0.5, dirname,
-                   xlabel='%s-%s time residuals (sec)' % (cat1.upper(),
+                   xlabel='%s-%s time differences (sec)' % (cat1.upper(),
                    cat2.upper()))
     make_diff_hist(newcat1, newcat2, cat1ids, cat2ids, 'mag', 0.1, dirname,
-                   xlabel='%s-%s magnitude residuals' % (cat1.upper(),
+                   xlabel='%s-%s magnitude differences' % (cat1.upper(),
                    cat2.upper()))
     make_diff_hist(newcat1, newcat2, cat1ids, cat2ids, 'depth', 2, dirname,
-                   xlabel='%s-%s depth residuals (km)' % (cat1.upper(),
+                   xlabel='%s-%s depth differences (km)' % (cat1.upper(),
+                   cat2.upper()))
+    make_diff_hist(newcat1, newcat2, cat1ids, cat2ids, 'distance', 1, dirname,
+                   xlabel='%s-%s distances (km)' % (cat1.upper(),
                    cat2.upper()))
 
 
