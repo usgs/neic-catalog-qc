@@ -93,7 +93,7 @@ def list_duplicates(catalog, dirname, timewindow=2, distwindow=15,
                     magwindow=None, minmag=-5, locfilter=None):
     """Make a list of possible duplicate events."""
     catalog.loc[:, 'convtime'] = [' '.join(x.split('T'))
-                               for x in catalog['time'].tolist()]
+                                  for x in catalog['time'].tolist()]
     catalog.loc[:, 'convtime'] = catalog['convtime'].astype('datetime64[ns]')
     catalog = catalog[catalog['mag'] >= minmag]
     if locfilter:
@@ -106,6 +106,7 @@ def list_duplicates(catalog, dirname, timewindow=2, distwindow=15,
     duplines2 = [('\n\nPossible duplicates using 16s time threshold and 100km '
                   'distance threshold\n'),
                  '***********************\n']
+    sep = '-----------------------\n'
 
     thresh1dupes, thresh2dupes = 0, 0
     for event in cat.itertuples():
@@ -122,16 +123,15 @@ def list_duplicates(catalog, dirname, timewindow=2, distwindow=15,
                     dmag = event.mag - tevent.mag
                     diffs = map('{:.2f}'.format, [dtime, dist, dmag])
 
-                    dupline1 = '-----------------------\n'
-                    dupline2 = ' '.join([str(x) for x in event[1:]]) + ' ' +\
+                    dupline1 = ' '.join([str(x) for x in event[1:]]) + ' ' +\
                                ' '.join(diffs) + '\n'
-                    dupline3 = ' '.join([str(x) for x in tevent[1:]]) + '\n'
-                    duplines2.extend((dupline1, dupline2, dupline3))
+                    dupline2 = ' '.join([str(x) for x in tevent[1:]]) + '\n'
+                    duplines2.extend((sep, dupline1, dupline2))
 
                     thresh2dupes += 1
 
                     if (dist < distwindow) and (abs(dtime) < timewindow):
-                        duplines1.extend((dupline1, dupline2, dupline3))
+                        duplines1.extend((sep, dupline1, dupline2))
                         thresh1dupes += 1
 
             continue
@@ -781,7 +781,7 @@ def cat_dup_search(catalog, dirname):
 
 
 def create_figures():
-    """Main function. Command line arguments defined here."""
+    """Generate and save all relevant figures and text files."""
     parser = argparse.ArgumentParser()
 
     parser.add_argument('catalog', nargs='?', type=str,
@@ -922,11 +922,11 @@ def generate_html(dirname):
     endyear = dirname[-4:]
 
     with open('{0}_catalogsummary.txt'.format(dirname)) as sumfile:
-        catsum = '\t\t' + '\n\t\t'.join(sumfile.readlines())
+        catsum = '\t\t' + '\t\t'.join(sumfile.readlines())
     with open('{0}_largestten.txt'.format(dirname)) as tenfile:
-        largest = '\t\t' + '\n\t\t'.join(tenfile.readlines())
+        largest = '\t\t' + '\t\t'.join(tenfile.readlines())
     with open('{0}_duplicates.txt'.format(dirname)) as dupfile:
-        duplist = '\t\t' + '\n\t\t'.join(dupfile.readlines())
+        duplist = '\t\t' + '\t\t'.join(dupfile.readlines())
     
     toc = ('## Contents\n'
            '- [Basic Catalog Summary](#catsum)\n'
@@ -992,7 +992,7 @@ def generate_html(dirname):
                ).format(dirname, catalog, startyear, endyear, catsum, largest,
                         duplist)
 
-    html = markdown.markdown(toc+mdstring)
+    html = markdown.markdown(toc + mdstring)
 
     with open('{0}_report.html'.format(dirname), 'w') as htmlfile:
         htmlfile.write(html)
