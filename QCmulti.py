@@ -6,9 +6,11 @@ import os
 import sys
 import errno
 import argparse
+import time
 from datetime import datetime
 from math import sqrt, degrees, radians, sin, cos, atan2, pi
 
+import markdown
 from scipy import stats
 import numpy as np
 import pandas as pd
@@ -64,73 +66,172 @@ def basic_cat_sum(catalog, catname, dirname):
     lines.append('Number of NaN magnitude events: %s'
                  % len(catalog[pd.isnull(catalog['mag'])]))
 
-    with open('%s_%ssummary.txt' % (dirname, catname), 'w') as sumfile:
+    with open('%s_summary.txt' % catname, 'w') as sumfile:
         for line in lines:
             sumfile.write(line)
 
 
-@printstatus('Creating summary of comparison criteria')
-def comp_criteria(cat1, cat2, dirname, reg, otwindow=16, distwindow=100):
-    """Trim catalogs and summarize comparison criteria."""
+@printstatus('Creating summary of comparison criteria and statistics')
+def comp_criteria(cat1, cat1name, cat1mids, cat2, cat2name, cat2mids, dirname,
+                  otwindow=16, distwindow=100):
+    """Trim catalogs and summarize comparison criteria/statistics."""
     lines = []
 
-    mintime = qcu.format_time(max(cat1['time'].min(), cat2['time'].min()))
-    maxtime = qcu.format_time(min(cat1['time'].max(), cat2['time'].max()))
+    #mintime = qcu.format_time(max(cat1['time'].min(), cat2['time'].min()))
+    #maxtime = qcu.format_time(min(cat1['time'].max(), cat2['time'].max()))
+    nummatches = len(cat1mids)
+    unq1 = len(cat1) - len(cat1mids)
+    unq2 = len(cat2) - len(cat2mids)
 
-    lines.append('Overlapping time period: %s to %s\n' % (mintime, maxtime))
-    lines.append('Region: %s\n' % reg)
-    lines.append('Authoritative agency: %s\n' % reg)
+    newcat1 = cat1[cat1['id'].isin(cat1mids)].reset_index(drop=True)
+    newcat2 = cat2[cat2['id'].isin(cat2mids)].reset_index(drop=True)
 
-    lines.append('Matching Criteria\n')
+    mintime = min(newcat1['time'].min(), newcat2['time'].min())
+    mintime = time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(mintime))
+    maxtime = max(newcat1['time'].max(), newcat2['time'].max())
+    maxtime = time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(maxtime))
+
+    lines.append('Overlapping time period: %s to %s\n\n' % (mintime, maxtime))
+
+    lines.append('-- Matching Criteria --\n')
     lines.append('Time window: %s s\n' % otwindow)
     lines.append('Distance window: %s km\n\n' % distwindow)
+
+    lines.append('-- Matching Results --\n')
+    lines.append('Number of associated events: %s\n' % nummatches)
+    lines.append('Number of unassociated %s events: %s\n' % (cat1name, unq1))
+    lines.append('Number of unassociated %s events: %s\n\n' % (cat2name, unq2))
+
+    lines.append('Minimum matched latitude: %s\n' %
+                 min(newcat1['latitude'].min(), newcat2['latitude'].min()))
+    lines.append('Maximum matched latitude: %s\n' %
+                 max(newcat1['latitude'].max(), newcat2['latitude'].max()))
+    lines.append('Minimum matched longitude: %s\n' %
+                 min(newcat1['longitude'].min(), newcat2['longitude'].max()))
+    lines.append('Maximum matched longitude: %s\n\n' %
+                 max(newcat1['longitude'].max(), newcat2['longitude'].max()))
+
+    lines.append('Minimum matched depth: %s\n' %
+                 min(newcat1['depth'].min(), newcat2['depth'].min()))
+    lines.append('Maximum matched depth: %s\n\n' %
+                 max(newcat1['depth'].max(), newcat2['depth'].max()))
+
+    lines.append('Minimum matched magnitude: %s\n' %
+                 min(newcat1['mag'].min(), newcat2['mag'].min()))
+    lines.append('Maximum matched magnitude: %s' %
+                 max(newcat1['mag'].max(), newcat2['mag'].max()))
+
 
     with open('%s_comparisoncriteria.txt' % dirname, 'w') as compfile:
         for line in lines:
             compfile.write(line)
 
 
-@printstatus(status='Matching events')
-def match_events(cat1, cat2, otwindow=16, distwindow=100):
+@printstatus('Matching events')
+def match_events(cat1, cat2, dirname, otwindow=16, distwindow=100):
     """Match events within two catalogs."""
+    cat1.loc[:, 'convtime'] = [' '.join(x.split('T')) for x in
+                               cat1['time'].tolist()]
+    cat1.loc[:, 'convtime'] = cat1['convtime'].astype('datetime64[ns]')
     cat1.loc[:, 'time'] = [qcu.to_epoch(x) for x in cat1['time']]
+    cat2.loc[:, 'convtime'] = [' '.join(x.split('T')) for x in
+                               cat2['time'].tolist()]
+    cat2.loc[:, 'convtime'] = cat2['convtime'].astype('datetime64[ns]')
     cat2.loc[:, 'time'] = [qcu.to_epoch(x) for x in cat2['time']]
 
     cat1, cat2 = qcu.trim_times(cat1, cat2, otwindow)
 
     cat1ids, cat2ids = [], []
+    matchlines = [('Matching events using %ss time threshold and %skm '
+                   'distance threshold\n') % (otwindow, distwindow),
+                  '***********************\n']
+    pcolumns = ['convtime', 'id', 'latitude', 'longitude', 'depth', 'mag']
+    sep = '-----------------------\n'
 
     for i in range(len(cat1)):
-
-        cat2ix = cat2[abs(cat2['time']
-                          - cat1.ix[i]['time']) <= otwindow].index.values
+        cat2ix = cat2[cat2['time'].between(cat1.ix[i]['time'] - otwindow,
+            cat1.ix[i]['time'] + otwindow)].index.values
 
         if len(cat2ix) != 0:
-
-            carr1 = np.array([gps2dist_azimuth(cat1.ix[i]['latitude'],
+            dists = np.array([gps2dist_azimuth(cat1.ix[i]['latitude'],
                 cat1.ix[i]['longitude'], cat2.ix[x]['latitude'],
                 cat2.ix[x]['longitude'])[0] / 1000. for x in cat2ix])
-            carr2 = np.array([abs(cat1.ix[i]['time'] - cat2.ix[x]['time'])
+            dtimes = np.array([abs(cat1.ix[i]['time'] - cat2.ix[x]['time'])
                               for x in cat2ix])
-            carr3 = carr1 + 5*carr2
+            carr = dists + 5*dtimes
 
-            ind = np.argmin(carr3)
+            ind = np.argmin(carr)
 
-            if (carr1[ind] < distwindow) and (carr2[ind] < otwindow):
-                cat1id = cat1.ix[i]['id']
-                cat2id = cat2.ix[cat2ix[ind]]['id']
+            if (dists[ind] < distwindow) and (dtimes[ind] < otwindow):
+                cat1event = cat1.ix[i][pcolumns]
+                cat2event = cat2.ix[cat2ix[ind]][pcolumns]
+                dmag = cat1event['mag'] - cat2event['mag']
+                diffs = map('{:.2f}'.format, [dists[ind], dtimes[ind], dmag])
 
-                cat1ids.append(cat1id)
-                cat2ids.append(cat2id)
+                mline1 = ' '.join([str(x) for x in cat1event[:]]) + ' ' +\
+                         ' '.join(diffs) + '\n'
+                mline2 = ' '.join([str(x) for x in cat2event[:]]) + '\n'
+                matchlines.extend((sep, mline1, mline2))
+
+                cat1ids.append(cat1event['id'])
+                cat2ids.append(cat2event['id'])
 
     cat1matched = cat1[cat1['id'].isin(cat1ids)].reset_index(drop=True)
     cat2matched = cat2[cat2['id'].isin(cat2ids)].reset_index(drop=True)
 
+    with open('%s_matches.txt' % dirname, 'w') as matchfile:
+        for mline in matchlines:
+            matchfile.write(mline)
+
     return cat1ids, cat2ids, cat1matched, cat2matched
 
 
+@printstatus('Finding closest unassociated events')
+def find_closest(cat1, cat1name, cat1mids, cat2, dirname):
+    """Find closest event for unassociated events."""
+    cat1un = cat1[~cat1['id'].isin(cat1mids)].reset_index(drop=True)
+
+    clines = ['Closest unassociated events for %s events\n' % cat1name,
+               '***********************\n']
+    pcolumns = ['convtime', 'id', 'latitude', 'longitude', 'depth', 'mag']
+    sep = '-----------------------\n'
+
+    for i in range(len(cat1un)):
+        print(i)
+        cat2ix = cat2[cat2['time'].between(cat1un.ix[i]['time'],
+            cat1.ix[i]['time'] + 300)].index.values
+        x = 600
+        while len(cat2ix) == 0:
+            cat2ix = cat2[cat2['time'].between(cat1un.ix[i]['time'],
+                cat1.ix[i]['time'] + x)].index.values
+            x += 6000
+
+        dists = np.array([gps2dist_azimuth(cat1un.ix[i]['latitude'],
+            cat1un.ix[i]['longitude'], cat2.ix[x]['latitude'],
+            cat2.ix[x]['longitude'])[0] / 1000. for x in cat2ix])
+        dtimes = np.array([abs(cat1un.ix[i]['time'] - cat2.ix[x]['time'])
+                          for x in cat2ix])
+        carr = dists + 5*dtimes
+
+        ind = np.argmin(carr)
+
+        cat1event = cat1un.ix[i][pcolumns]
+        cat2event = cat2.ix[cat2ix[ind]][pcolumns]
+        dmag = cat1event['mag'] - cat2event['mag']
+        diffs = map('{:.2f}'.format, [dists[ind], dtimes[ind], dmag])
+
+        cline1 = ' '.join([str(x) for x in cat1event[:]]) + ' ' +\
+                 ' '.join(diffs) + '\n'
+        cline2 = ' '.join([str(x) for x in cat2event[:]]) + '\n'
+        clines.extend((sep, cline1, cline2))
+
+    with open('%s_closestunassociated.txt' % dirname, 'w') as unfile:
+        for cline in clines:
+            unfile.write(cline)
+
+
 @printstatus('Mapping events from both catalogs')
-def map_events(cat1, cat2, cat1mids, cat2mids, dirname):
+def map_events(cat1, cat1name, cat2, cat2name, cat1mids, cat2mids, dirname):
     """Map matching events between catalogs."""
     lllat, lllon, urlat, urlon, _, _, _, clon = qcu.get_map_bounds(cat1, cat2)
 
@@ -155,13 +256,14 @@ def map_events(cat1, cat2, cat1mids, cat2mids, dirname):
                     color='k', transform=ccrs.PlateCarree())
 
     mplmap.scatter(cat1lons, cat1lats, color='b', s=2, zorder=4,
-                   transform=ccrs.PlateCarree())
+                   transform=ccrs.PlateCarree(), label=cat1name)
     mplmap.scatter(cat2lons, cat2lats, color='r', s=2, zorder=4,
-                   transform=ccrs.PlateCarree())
+                   transform=ccrs.PlateCarree(), label=cat2name)
     mplmap.add_feature(cfeature.NaturalEarthFeature('cultural',
         'admin_1_states_provinces_lines', '50m', facecolor='none',
         edgecolor='k', zorder=9))
     mplmap.add_feature(cfeature.BORDERS)
+    plt.legend()
 
     plt.savefig('%s_mapmatcheddetecs.png' % dirname, dpi=300)
     plt.close()
@@ -184,6 +286,7 @@ def map_unique_events(cat, catname, mids):
         'admin_1_states_provinces_lines', '50m', facecolor='none',
         edgecolor='k', zorder=9))
     mplmap.add_feature(cfeature.BORDERS)
+    plt.title('%s unassociated events' % catname, fontsize=20, y=1.08)
 
     plt.savefig('%s_uniquedetecs.png' % catname, dpi=300)
     plt.close()
@@ -297,7 +400,7 @@ def make_diff_hist(cat1, cat2, cat1mids, cat2mids, param, binsize, dirname,
                               numbins+2) - binsize/2.
 
     plt.figure(figsize=(12, 6))
-    plt.title(title)
+    plt.title(title, fontsize=20)
     plt.xlabel(xlabel, fontsize=14)
     plt.ylabel('Count', fontsize=14)
 
@@ -317,8 +420,8 @@ def make_diff_hist(cat1, cat2, cat1mids, cat2mids, param, binsize, dirname,
 ###############################################################################
 
 
-def main():
-    """Main function. Command line arguments defined here."""
+def create_figures():
+    """Generate and save all relevant figures and text files."""
     parser = argparse.ArgumentParser()
 
     parser.add_argument('catalog1', nargs='?', type=str,
@@ -431,13 +534,17 @@ def main():
                           'period. Quitting...\n') % cat2.upper())
         sys.exit()
 
+    cat1, cat2 = cat1.upper(), cat2.upper()
+
     os.chdir(dirname)
     basic_cat_sum(datadf1, cat1, dirname)
     basic_cat_sum(datadf2, cat2, dirname)
-    comp_criteria(datadf1, datadf2, dirname, cat1.upper())
-    cat1ids, cat2ids, newcat1, newcat2 = match_events(datadf1, datadf2)
+    cat1ids, cat2ids, newcat1, newcat2 = match_events(datadf1, datadf2,
+        dirname)
+    comp_criteria(datadf1, cat1, cat1ids, datadf2, cat2, cat2ids, dirname)
+    #find_closest(datadf1, cat1, cat1ids, datadf2, dirname)
 
-    map_events(newcat1, newcat2, cat1ids, cat2ids, dirname)
+    map_events(newcat1, cat1, newcat2, cat2, cat1ids, cat2ids, dirname)
     map_unique_events(datadf1, cat1, cat1ids)
     map_unique_events(datadf2, cat2, cat2ids)
     make_az_dist(newcat1, cat1, newcat2, cat2, cat1ids, cat2ids, dirname)
@@ -458,11 +565,71 @@ def main():
                    xlabel='%s-%s distances (km)' % (cat1.upper(),
                    cat2.upper()))
 
+    return dirname
+
+
+def generate_html(dirname):
+    """Generate an HTML file containing all of the generated images and test
+    files."""
+    catalog1 = dirname.split('-')[0].upper()
+    catalog2 = dirname.split('-')[1][:-4].upper()
+    startyear = dirname.split('-')[1][-4:]
+    endyear = dirname.split('-')[-1]
+
+    with open('{0}_summary.txt'.format(catalog1)) as sum1file:
+        cat1sum = '\t\t' + '\t\t'.join(sum1file.readlines())
+    with open('{0}_summary.txt'.format(catalog2)) as sum2file:
+        cat2sum = '\t\t' + '\t\t'.join(sum2file.readlines())
+    with open('{0}_comparisoncriteria.txt'.format(dirname)) as compfile:
+        compcrit = '\t\t' + '\t\t'.join(compfile.readlines())
+    with open('{0}_matches.txt'.format(dirname)) as matchfile:
+        matches = '\t\t' + '\t\t'.join(matchfile.readlines())
+
+    toc = ('## Contents\n'
+           '- [Basic Catalog Statistics](#catstats)\n'
+           '    - [Catalog 1](#cat1stats)\n'
+           '    - [Catalog 2](#cat2stats)\n'
+           '- [Comparison Criteria](#compcrit)\n'
+           '- [Summary of Matching Events](#matches)\n'
+           '- [Matching Event Figures](#matchfigs)\n'
+           '- [Unassociated Events](#missevs)\n---\n')
+
+    mdstring = ('# Report for {1} and {2} from {3} to {4}\n'
+                '## Basic Catalog Statistics <a name="catstats"></a>\n'
+                '### Catalog 1 <a name="cat1stats"></a>\n---\n'
+                '{5}\n'
+                '### Catalog 2 <a name="cat2stats"></a>\n---\n'
+                '{6}\n'
+                '### Comparison Criteria <a name="compcrit"></a>\n---\n'
+                '{7}\n'
+                '### Summary of Matching Events <a name="matches"></a>\n---\n'
+                '{8}\n'
+                '### Matching Event Figures <a name="matchfigs"></a>\n---\n'
+                '<img width="70%" src="{0}_mapmatcheddetecs.png">\n'
+                '<img width="45%" src="{0}_polarazimuth.png">\n'
+                '<img width="50%" src="{0}_comparemag.png">\n'
+                '<img width="50%" src="{0}_comparedepth.png">\n'
+                '<img width="50%" src="{0}_timediffs.png">\n'
+                '<img width="50%" src="{0}_distancediffs.png">\n'
+                '<img width="50%" src="{0}_magdiffs.png">\n'
+                '<img width="50%" src="{0}_depthdiffs.png">\n'
+                '### Unassociated Events <a name="missevs"></a>\n---\n'
+                '<img width="50%" src="{1}_uniquedetecs.png">\n'
+                '<img width="50%" src="{2}_uniquedetecs.png">'
+                ).format(dirname, catalog1, catalog2, startyear, endyear,
+                         cat1sum, cat2sum, compcrit, matches)
+
+    html = markdown.markdown(toc + mdstring)
+
+    with open('{0}_report.html'.format(dirname), 'w') as htmlfile:
+        htmlfile.write(html)
+
 
 if __name__ == '__main__':
 
     try:
-        main()
+        dirname = create_figures()
+        generate_html(dirname)
     except (KeyboardInterrupt, SystemError):
         sys.stdout.write('\nProgram canceled. Exiting...\n')
         sys.exit()
