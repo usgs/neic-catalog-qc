@@ -7,6 +7,7 @@ import sys
 import errno
 import argparse
 import time
+import shutil
 from datetime import datetime
 from math import sqrt, degrees, radians, sin, cos, atan2, pi
 
@@ -318,7 +319,7 @@ def make_az_dist(cat1, cat1name, cat2, cat2name, cat1mids, cat2mids, dirname,
 
     for _, hbar in list(zip(hist, bars)):
         hbar.set_facecolor('b')
-        hbar.set_alpha(0.5)
+        hbar.set_alpha(0.2)
 
     plt.subplots_adjust(left=0.1, right=0.95, top=0.9, bottom=0.11)
 
@@ -339,8 +340,8 @@ def compare_params(cat1, cat1name, cat2, cat2name, cat1mids, cat2mids, param,
         cat1params.append(param1)
         cat2params.append(param2)
 
-    minparam = max(min(cat1params), min(cat2params))
-    maxparam = min(max(cat1params), max(cat2params))
+    minparam = min(min(cat1params), min(cat2params))
+    maxparam = max(max(cat1params), max(cat2params))
 
     mval, bval, rval, _, _ = stats.linregress(cat1params, cat2params)
     linegraph = [mval*x + bval for x in cat1params]
@@ -443,6 +444,9 @@ def create_figures():
     parser.add_argument('-fd', '--forcedownload', action='store_true',
                         help='forces downloading of data even if .csv file \
                         exists')
+    parser.add_argument('-nm', '--nomatches', action='store_false',
+                        help='do not include list of matching events in HTML \
+                        report')
 
     args = parser.parse_args()
 
@@ -521,8 +525,11 @@ def create_figures():
                 raise
 
         datadf1, datadf2 = pd.read_csv(sfcat1), pd.read_csv(sfcat2)
-        copy2(sfcat1, dirname)
-        copy2(sfcat2, dirname)
+        try:
+            copy2(sfcat1, dirname)
+            copy2(sfcat2, dirname)
+        except shutil.SameFileError:
+            pass
 
     if len(datadf1) == 0:
         sys.stdout.write(('%s catalog has no data available for that time '
@@ -561,14 +568,14 @@ def create_figures():
     make_diff_hist(newcat1, newcat2, cat1ids, cat2ids, 'depth', 2, dirname,
                    xlabel='%s-%s depth differences (km)' % (cat1.upper(),
                    cat2.upper()))
-    make_diff_hist(newcat1, newcat2, cat1ids, cat2ids, 'distance', 1, dirname,
+    make_diff_hist(newcat1, newcat2, cat1ids, cat2ids, 'distance', 2, dirname,
                    xlabel='%s-%s distances (km)' % (cat1.upper(),
                    cat2.upper()))
 
-    return dirname
+    return dirname, args.nomatches
 
 
-def generate_html(dirname):
+def generate_html(dirname, matchbool):
     """Generate an HTML file containing all of the generated images and test
     files."""
     catalog1 = dirname.split('-')[0].upper()
@@ -585,14 +592,22 @@ def generate_html(dirname):
     with open('{0}_matches.txt'.format(dirname)) as matchfile:
         matches = '\t\t' + '\t\t'.join(matchfile.readlines())
 
+    if matchbool:
+        tocm = '- [Summary of Matching Events](#matches)\n'
+        strm = ('### Summary of Matching Events <a name="matches"></a>\n---\n'
+                '{0}\n').format(matches)
+    else:
+        tocm, strm = '', ''
+
     toc = ('## Contents\n'
            '- [Basic Catalog Statistics](#catstats)\n'
            '    - [Catalog 1](#cat1stats)\n'
            '    - [Catalog 2](#cat2stats)\n'
            '- [Comparison Criteria](#compcrit)\n'
-           '- [Summary of Matching Events](#matches)\n'
-           '- [Matching Event Figures](#matchfigs)\n'
-           '- [Unassociated Events](#missevs)\n---\n')
+           '- [Matching Event Hypocenters](#matchh)\n'
+           '- [Matching Event Magnitudes](#matchm)\n'
+           '- [Unassociated Events](#missevs)\n'
+           '{0}---\n').format(tocm)
 
     mdstring = ('# Report for {1} and {2} from {3} to {4}\n'
                 '## Basic Catalog Statistics <a name="catstats"></a>\n'
@@ -602,22 +617,22 @@ def generate_html(dirname):
                 '{6}\n'
                 '### Comparison Criteria <a name="compcrit"></a>\n---\n'
                 '{7}\n'
-                '### Summary of Matching Events <a name="matches"></a>\n---\n'
-                '{8}\n'
-                '### Matching Event Figures <a name="matchfigs"></a>\n---\n'
-                '<img width="70%" src="{0}_mapmatcheddetecs.png">\n'
-                '<img width="45%" src="{0}_polarazimuth.png">\n'
-                '<img width="50%" src="{0}_comparemag.png">\n'
-                '<img width="50%" src="{0}_comparedepth.png">\n'
-                '<img width="50%" src="{0}_timediffs.png">\n'
-                '<img width="50%" src="{0}_distancediffs.png">\n'
-                '<img width="50%" src="{0}_magdiffs.png">\n'
-                '<img width="50%" src="{0}_depthdiffs.png">\n'
+                '### Matching Event Hypocenters <a name="matchh"></a>\n---\n'
+                '<img width="80%" src="{0}_mapmatcheddetecs.png">\n'
+                '<img width="60%" src="{0}_polarazimuth.png">\n'
+                '<img width="80%" src="{0}_distancediffs.png">\n'
+                '<img width="80%" src="{0}_depthdiffs.png">\n'
+                '<img width="80%" src="{0}_comparedepth.png">\n'
+                '<img width="80%" src="{0}_timediffs.png">\n'
+                '### Matching Event Magnitudes <a name="matchm"></a>\n---\n'
+                '<img width="80%" src="{0}_magdiffs.png">\n'
+                '<img width="80%" src="{0}_comparemag.png">\n'
                 '### Unassociated Events <a name="missevs"></a>\n---\n'
-                '<img width="50%" src="{1}_uniquedetecs.png">\n'
-                '<img width="50%" src="{2}_uniquedetecs.png">'
+                '<img width="80%" src="{1}_uniquedetecs.png">\n'
+                '<img width="80%" src="{2}_uniquedetecs.png">\n'
+                '{8}'
                 ).format(dirname, catalog1, catalog2, startyear, endyear,
-                         cat1sum, cat2sum, compcrit, matches)
+                         cat1sum, cat2sum, compcrit, strm)
 
     html = markdown.markdown(toc + mdstring)
 
@@ -628,8 +643,8 @@ def generate_html(dirname):
 if __name__ == '__main__':
 
     try:
-        dirname = create_figures()
-        generate_html(dirname)
+        dirname, matches = create_figures()
+        generate_html(dirname, matches)
     except (KeyboardInterrupt, SystemError):
         sys.stdout.write('\nProgram canceled. Exiting...\n')
         sys.exit()
