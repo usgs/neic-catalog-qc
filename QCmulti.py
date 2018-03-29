@@ -360,6 +360,7 @@ def compare_params(cat1, cat1name, cat2, cat2name, cat1mids, cat2mids, param,
     plt.ylim(minparam, maxparam)
     plt.xlabel('%s %s' % (cat1name, aparam), fontsize=14)
     plt.ylabel('%s %s' % (cat2name, aparam), fontsize=14)
+    plt.axes().set_aspect('equal', 'box')
 
     plt.title('%s correlation' % tparam, fontsize=20)
 
