@@ -353,9 +353,7 @@ def compare_params(cat1, cat1name, cat2, cat2name, cat1mids, cat2mids, param,
 
     plt.figure(figsize=(8, 8))
     plt.scatter(cat1params, cat2params, edgecolor='b', facecolor=None)
-    plt.plot(xes, linegraph, c='r', linewidth=1,
-             label=r'best fit (m = %0.2f, $\mathregular{R^2}$ = %0.2f)'
-             % (mval, r2val))
+    plt.plot(xes, linegraph, c='r', linewidth=1, label='best fit')
     plt.plot(xes, xes, c='k', linewidth=1, label='m = 1')
     plt.legend(loc='upper left')
     plt.xlim(minparam, maxparam)
