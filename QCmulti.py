@@ -9,7 +9,7 @@ import argparse
 import time
 import shutil
 from datetime import datetime
-from math import sqrt, degrees, radians, sin, cos, atan2, pi
+from math import sqrt, degrees, radians, sin, cos, atan2, pi, ceil
 
 import markdown
 from scipy import stats
@@ -342,9 +342,10 @@ def compare_params(cat1, cat1name, cat2, cat2name, cat1mids, cat2mids, param,
 
     minparam = min(min(cat1params), min(cat2params))
     maxparam = max(max(cat1params), max(cat2params))
+    xes = range(int(minparam), ceil(maxparam))
 
     mval, bval, rval, _, _ = stats.linregress(cat1params, cat2params)
-    linegraph = [mval*x + bval for x in cat1params]
+    linegraph = [mval*x + bval for x in xes]
     r2val = rval*rval
 
     aparam = param if param != 'mag' else 'magnitude'
@@ -352,9 +353,10 @@ def compare_params(cat1, cat1name, cat2, cat2name, cat1mids, cat2mids, param,
 
     plt.figure(figsize=(8, 8))
     plt.scatter(cat1params, cat2params, edgecolor='b', facecolor=None)
-    plt.plot(cat1params, linegraph, c='r', linewidth=1,
-             label=r'$\mathregular{R^2}$ = %0.2f' % r2val)
-    plt.plot(cat1params, cat1params, c='k', linewidth=1, label='B = 1')
+    plt.plot(xes, linegraph, c='r', linewidth=1,
+             label=r'best fit (m = %0.2f, $\mathregular{R^2}$ = %0.2f)'
+             % (mval, r2val))
+    plt.plot(xes, xes, c='k', linewidth=1, label='m = 1')
     plt.legend(loc='upper left')
     plt.xlim(minparam, maxparam)
     plt.ylim(minparam, maxparam)
