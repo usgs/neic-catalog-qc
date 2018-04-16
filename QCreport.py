@@ -98,14 +98,20 @@ def list_duplicates(catalog, dirname, timewindow=2, distwindow=15,
     catalog = catalog[catalog['mag'] >= minmag]
     if locfilter:
         catalog = catalog[catalog['place'].str.contains(locfilter, na=False)]
-    cat = catalog[['convtime', 'id', 'latitude', 'longitude', 'depth', 'mag']]
+    cat = catalog[['time', 'convtime', 'id', 'latitude', 'longitude', 'depth',
+                   'mag']].copy()
+    cat.loc[:, 'time'] = [qcu.to_epoch(x) for x in cat['time']]
 
     duplines1 = [('Possible duplicates using %ss time threshold and %skm '
                   'distance threshold\n') % (timewindow, distwindow),
-                 '***********************\n']
+                 '***********************\n'
+                 'date time id latitude longitude depth magnitude '
+                 '(distance) (Δ time) (Δ magnitude)\n']
     duplines2 = [('\n\nPossible duplicates using 16s time threshold and 100km '
                   'distance threshold\n'),
-                 '***********************\n']
+                 '***********************\n'
+                 'date time id latitude longitude depth magnitude '
+                 '(distance) (Δ time) (Δ magnitude)\n']
     sep = '-----------------------\n'
 
     thresh1dupes, thresh2dupes = 0, 0
@@ -121,7 +127,7 @@ def list_duplicates(catalog, dirname, timewindow=2, distwindow=15,
                 if dist < 100:
                     dtime = (event.convtime - tevent.convtime).total_seconds()
                     dmag = event.mag - tevent.mag
-                    diffs = map('{:.2f}'.format, [dtime, dist, dmag])
+                    diffs = map('{:.2f}'.format, [dist, dtime, dmag])
 
                     dupline1 = ' '.join([str(x) for x in event[1:]]) + ' ' +\
                                ' '.join(diffs) + '\n'
@@ -793,10 +799,16 @@ def create_figures():
                         help='pick end year (to get a single year of data, \
                         enter same year as startyear)')
 
+    parser.add_argument('-mr', '--magrange', type=float, nargs=2,
+                        default=[-5, 12],
+                        help='give the magnitude range for downloading data \
+                        (default range is from -5 to 12)')
     parser.add_argument('-tw', '--timewindow', type=float, default=2,
-                        help='change time window for finding duplicates')
+                        help='change time window for finding duplicates \
+                        (default is 2 seconds)')
     parser.add_argument('-dw', '--distwindow', type=float, default=15,
-                        help='change distance window for finding duplicates')
+                        help='change distance window for finding duplicates \
+                        (default is 15 kilometers)')
     parser.add_argument('-sf', '--specifyfile', type=str,
                         help='specify existing .csv file to use')
     parser.add_argument('-fd', '--forcedownload', action='store_true',
@@ -804,6 +816,8 @@ def create_figures():
                         exists')
 
     args = parser.parse_args()
+
+    minmag, maxmag = args.magrange
 
     if args.specifyfile is None:
 
@@ -831,7 +845,8 @@ def create_figures():
                 if exception.errno != errno.EEXIST:
                     raise
             datadf = qcu.get_data(catalog, startyear=startyear,
-                                  endyear=endyear)
+                                  endyear=endyear, minmag=minmag,
+                                  maxmag=maxmag)
         else:
             # Python 2
             try:
@@ -844,7 +859,8 @@ def create_figures():
                         if exception.errno != errno.EEXIST:
                             raise
                     datadf = qcu.get_data(catalog, startyear=startyear,
-                                          endyear=endyear)
+                                          endyear=endyear, minmag=minmag,
+                                          maxmag=maxmag)
             # Python 3
             except:
                 try:
@@ -856,7 +872,8 @@ def create_figures():
                         if exception.errno != errno.EEXIST:
                             raise
                     datadf = qcu.get_data(catalog, startyear=startyear,
-                                          endyear=endyear)
+                                          endyear=endyear, minmag=minmag,
+                                          maxmag=maxmag)
 
     else:
         from shutil import copy2
