@@ -193,12 +193,13 @@ def find_closest(cat1, cat1name, cat1mids, cat2, dirname):
     cat1un = cat1[~cat1['id'].isin(cat1mids)].reset_index(drop=True)
 
     clines = ['Closest unassociated events for %s events\n' % cat1name,
-               '***********************\n']
+               '***********************\n'
+               'date time id latitude longitude depth magnitude '
+               '(distance) (Δ time) (Δ magnitude)\n']
     pcolumns = ['convtime', 'id', 'latitude', 'longitude', 'depth', 'mag']
     sep = '-----------------------\n'
 
     for i in range(len(cat1un)):
-        print(i)
         cat2ix = cat2[cat2['time'].between(cat1un.ix[i]['time'],
             cat1.ix[i]['time'] + 300)].index.values
         x = 600
@@ -221,9 +222,9 @@ def find_closest(cat1, cat1name, cat1mids, cat2, dirname):
         dmag = cat1event['mag'] - cat2event['mag']
         diffs = map('{:.2f}'.format, [dists[ind], dtimes[ind], dmag])
 
-        cline1 = ' '.join([str(x) for x in cat1event[:]]) + ' ' +\
+        cline1 = ' '.join([str(x) for x in cat1event[:]]) + '\n'
+        cline2 = ' '.join([str(x) for x in cat2event[:]]) + ' ' +\
                  ' '.join(diffs) + '\n'
-        cline2 = ' '.join([str(x) for x in cat2event[:]]) + '\n'
         clines.extend((sep, cline1, cline2))
 
     with open('%s_closestunassociated.txt' % dirname, 'w') as unfile:
@@ -440,6 +441,10 @@ def create_figures():
                         enter same year as startyear); if using -sf, give \
                         last year in catalog')
 
+    parser.add_argument('-mr', '--magrange', nargs=2, type=float,
+                        default=[-5, 12],
+                        help='give the magnitude range for downloading data \
+                        (default range is from -5 to 12)')
     parser.add_argument('-sf', '--specifyfiles', nargs=2, type=str,
                         help='specify two existing .csv files to use')
     parser.add_argument('-fd', '--forcedownload', action='store_true',
@@ -450,6 +455,8 @@ def create_figures():
                         report')
 
     args = parser.parse_args()
+
+    minmag, maxmag = args.magrange
 
     if args.specifyfiles is None:
 
@@ -479,7 +486,8 @@ def create_figures():
                 if exception.errno != errno.EEXIST:
                     raise
             datadf1, datadf2 = qcu.get_data(cat1, catalog2=cat2,
-                startyear=startyear, endyear=endyear)
+                startyear=startyear, endyear=endyear, minmag=minmag,
+                maxmag=maxmag)
         else:
             # Python 2
             try:
@@ -495,7 +503,8 @@ def create_figures():
                         if exception.errno != errno.EEXIST:
                             raise
                     datadf1, datadf2 = qcu.get_data(cat1, catalog2=cat2,
-                        startyear=startyear, endyear=endyear)
+                        startyear=startyear, endyear=endyear, minmag=minmag,
+                        maxmag=maxmag)
             # Python 3
             except:
                 try:
@@ -510,7 +519,8 @@ def create_figures():
                         if exception.errno != errno.EEXIST:
                             raise
                     datadf1, datadf2 = qcu.get_data(cat1, catalog2=cat2,
-                        startyear=startyear, endyear=endyear)
+                        startyear=startyear, endyear=endyear, minmag=minmag,
+                        maxmag=maxmag)
 
     else:
         from shutil import copy2

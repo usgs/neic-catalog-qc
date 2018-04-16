@@ -40,7 +40,8 @@ def progress_bar(count, total, status=''):
 @retry(HTTPError, tries=5, delay=0.5, backoff=1)
 def access_url(url):
     """Return list of lines in url; if HTTPError, repeat."""
-    return [line.rstrip() for line in urlopen(url).readlines()]
+    for line in urlopen(url).readlines():
+        yield line.rstrip()
 
 
 def format_time(ogtime):
@@ -251,7 +252,7 @@ def WW2000(mcval, mags, binsize):
 
 
 def get_data(catalog1, catalog2=None, startyear=2000, endyear=2000,
-             minmag=-5, maxmag=15, dev=False):
+             minmag=-5, maxmag=12, dev=False):
     """Download catalog data from earthquake.usgs.gov"""
     year  = startyear
     catalog1 = catalog1.lower()
@@ -297,7 +298,7 @@ def get_data(catalog1, catalog2=None, startyear=2000, endyear=2000,
                     '&orderby=time-asc&catalog={2}&minmagnitude={3}'
                     '&maxmagnitude={4}').format(startd, endd, catalog1,
                     str(minmag), str(maxmag))
-            monthdata1 = access_url(url1)
+            monthdata1 = list(access_url(url1))
 
             if catalog2:
                 url2 = ('https://earthquake.usgs.gov/fdsnws/event/1/query.csv'
@@ -306,7 +307,7 @@ def get_data(catalog1, catalog2=None, startyear=2000, endyear=2000,
                         '&maxmagnitude={4}&includesuperseded={5}'
                         ).format(startd, endd, catalog2, str(minmag),
                         str(maxmag), dev)
-                monthdata2 = access_url(url2)
+                monthdata2 = list(access_url(url2))
 
             if (month != 1) or (year != startyear):
                 del monthdata1[0]
