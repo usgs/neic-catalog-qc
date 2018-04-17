@@ -251,31 +251,25 @@ def WW2000(mcval, mags, binsize):
     return mcval, bvalue, avalue, lval, mag_bins, std_dev
 
 
-def get_data(catalog1, catalog2=None, startyear=2000, endyear=2000,
-             minmag=-5, maxmag=12, dev=False):
+def get_data(catalog, dirname, startyear=2000, endyear=2000, minmag=-5,
+             maxmag=12, dev=False):
     """Download catalog data from earthquake.usgs.gov"""
     year  = startyear
-    catalog1 = catalog1.lower()
-    alldata1 = []
-    cat1name = catalog1 if catalog1 else 'all'
-    f1name = '%s%s-%s.csv' % (cat1name, startyear, endyear)
+    catalog = catalog.lower()
+    alldata = []
+    catname = catalog if catalog else 'all'
+    fname = '%s%s-%s.csv' % (catname, startyear, endyear)
     dev = str(dev).lower()
 
-    if catalog2:
-        catalog2 = catalog2.lower()
-        alldata2 = []
-        cat2name = catalog2 if catalog2 else 'all'
-        dirname = '%s-%s%s-%s' % (cat1name, cat2name, startyear, endyear)
-        f2name = '%s%s-%s.csv' % (cat2name, startyear, endyear)
-    else:
-        dirname = '%s%s-%s' % (cat1name, startyear, endyear)
+    catstring = '&catalog={0}'.format(catname) if catname != 'all'\
+                 else ''
 
     bartotal = 12 * (endyear - startyear + 1)
     barcount = 1
 
     while year <= endyear:
         month = 1
-        yeardata1, yeardata2 = [], []
+        yeardata = []
 
         while month <= 12:
             if month in [4, 6, 9, 11]:
@@ -293,60 +287,33 @@ def get_data(catalog1, catalog2=None, startyear=2000, endyear=2000,
             startd = '-'.join([str(year), str(month)])
             endd = '-'.join([str(year), str(month), str(endday)])
 
-            url1 = ('https://earthquake.usgs.gov/fdsnws/event/1/query.csv'
-                    '?starttime={0}-1%2000:00:00&endtime={1}%2023:59:59'
-                    '&orderby=time-asc&catalog={2}&minmagnitude={3}'
-                    '&maxmagnitude={4}').format(startd, endd, catalog1,
-                    str(minmag), str(maxmag))
-            monthdata1 = list(access_url(url1))
-
-            if catalog2:
-                url2 = ('https://earthquake.usgs.gov/fdsnws/event/1/query.csv'
-                        '?starttime={0}-1%2000:00:00&endtime={1}%2023:59:59'
-                        '&orderby=time-asc&catalog={2}&minmagnitude={3}'
-                        '&maxmagnitude={4}&includesuperseded={5}'
-                        ).format(startd, endd, catalog2, str(minmag),
-                        str(maxmag), dev)
-                monthdata2 = list(access_url(url2))
+            url = ('https://earthquake.usgs.gov/fdsnws/event/1/query.csv'
+                   '?starttime={0}-1%2000:00:00&endtime={1}%2023:59:59'
+                   '&orderby=time-asc{2}&minmagnitude={3}'
+                   '&maxmagnitude={4}').format(startd, endd, catstring,
+                   str(minmag), str(maxmag))
+            monthdata = list(access_url(url))
 
             if (month != 1) or (year != startyear):
-                del monthdata1[0]
-                if catalog2:
-                    del monthdata2[0]
+                del monthdata[0]
 
-            yeardata1.append(monthdata1)
-            if catalog2:
-                yeardata2.append(monthdata2)
+            yeardata.append(monthdata)
 
             progress_bar(barcount, bartotal, 'Downloading data ...')
             barcount += 1
             month += 1
 
-        alldata1.append(yeardata1)
-        if catalog2:
-            alldata2.append(yeardata2)
-
+        alldata.append(yeardata)
         year += 1
 
-    alldata1 = [item for sublist in alldata1 for item in sublist]
-    alldata1 = [item for sublist in alldata1 for item in sublist]
-    if catalog2:
-        alldata2 = [item for sublist in alldata2 for item in sublist]
-        alldata2 = [item for sublist in alldata2 for item in sublist]
+    # Flatten list
+    alldata = [item for sublist in alldata for item in sublist]
+    alldata = [item for sublist in alldata for item in sublist]
 
-    with open('%s/%s' % (dirname, f1name), 'w') as openfile:
-        for event in alldata1:
+    with open('%s/%s' % (dirname, fname), 'w') as openfile:
+        for event in alldata:
             openfile.write('%s\n' % event.decode())
-    alldatadf1 = pd.read_csv('%s/%s' % (dirname, f1name))
+    alldatadf = pd.read_csv('%s/%s' % (dirname, fname))
 
-    if catalog2:
-        with open('%s/%s' % (dirname, f2name), 'w') as openfile:
-            for event in alldata2:
-                openfile.write('%s\n' % event.decode())
-        alldatadf2 = pd.read_csv('%s/%s' % (dirname, f2name))
-
-        return alldatadf1, alldatadf2
-    else:
-        return alldatadf1
-
+    return alldatadf
 
