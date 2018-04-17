@@ -78,50 +78,61 @@ def comp_criteria(cat1, cat1name, cat1mids, cat2, cat2name, cat2mids, dirname,
     """Trim catalogs and summarize comparison criteria/statistics."""
     lines = []
 
-    #mintime = qcu.format_time(max(cat1['time'].min(), cat2['time'].min()))
-    #maxtime = qcu.format_time(min(cat1['time'].max(), cat2['time'].max()))
     nummatches = len(cat1mids)
     unq1 = len(cat1) - len(cat1mids)
     unq2 = len(cat2) - len(cat2mids)
 
-    newcat1 = cat1[cat1['id'].isin(cat1mids)].reset_index(drop=True)
-    newcat2 = cat2[cat2['id'].isin(cat2mids)].reset_index(drop=True)
+    if nummatches > 0:
+        newcat1 = cat1[cat1['id'].isin(cat1mids)].reset_index(drop=True)
+        newcat2 = cat2[cat2['id'].isin(cat2mids)].reset_index(drop=True)
 
-    mintime = min(newcat1['time'].min(), newcat2['time'].min())
-    mintime = time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(mintime))
-    maxtime = max(newcat1['time'].max(), newcat2['time'].max())
-    maxtime = time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(maxtime))
+        mintime = min(newcat1['time'].min(), newcat2['time'].min())
+        mintime = time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(mintime))
+        maxtime = max(newcat1['time'].max(), newcat2['time'].max())
+        maxtime = time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(maxtime))
 
-    lines.append('Overlapping time period: %s to %s\n\n' % (mintime, maxtime))
+        lines.append('Overlapping time period: %s to %s\n\n'
+                     % (mintime, maxtime))
 
-    lines.append('-- Matching Criteria --\n')
-    lines.append('Time window: %s s\n' % otwindow)
-    lines.append('Distance window: %s km\n\n' % distwindow)
+        lines.append('-- Matching Criteria --\n')
+        lines.append('Time window: %s s\n' % otwindow)
+        lines.append('Distance window: %s km\n\n' % distwindow)
 
-    lines.append('-- Matching Results --\n')
-    lines.append('Number of associated events: %s\n' % nummatches)
-    lines.append('Number of unassociated %s events: %s\n' % (cat1name, unq1))
-    lines.append('Number of unassociated %s events: %s\n\n' % (cat2name, unq2))
+        lines.append('-- Matching Results --\n')
+        lines.append('Number of associated events: %s\n' % nummatches)
+        lines.append('Number of unassociated %s events: %s\n'
+                     % (cat1name, unq1))
+        lines.append('Number of unassociated %s events: %s\n\n'
+                     % (cat2name, unq2))
 
-    lines.append('Minimum matched latitude: %s\n' %
-                 min(newcat1['latitude'].min(), newcat2['latitude'].min()))
-    lines.append('Maximum matched latitude: %s\n' %
-                 max(newcat1['latitude'].max(), newcat2['latitude'].max()))
-    lines.append('Minimum matched longitude: %s\n' %
-                 min(newcat1['longitude'].min(), newcat2['longitude'].max()))
-    lines.append('Maximum matched longitude: %s\n\n' %
-                 max(newcat1['longitude'].max(), newcat2['longitude'].max()))
+        lines.append('Minimum matched latitude: %s\n' %
+                     min(newcat1['latitude'].min(), newcat2['latitude'].min()))
+        lines.append('Maximum matched latitude: %s\n' %
+                     max(newcat1['latitude'].max(), newcat2['latitude'].max()))
+        lines.append('Minimum matched longitude: %s\n' %
+                     min(newcat1['longitude'].min(),
+                         newcat2['longitude'].max()))
+        lines.append('Maximum matched longitude: %s\n\n' %
+                     max(newcat1['longitude'].max(),
+                         newcat2['longitude'].max()))
 
-    lines.append('Minimum matched depth: %s\n' %
-                 min(newcat1['depth'].min(), newcat2['depth'].min()))
-    lines.append('Maximum matched depth: %s\n\n' %
-                 max(newcat1['depth'].max(), newcat2['depth'].max()))
+        lines.append('Minimum matched depth: %s\n' %
+                     min(newcat1['depth'].min(), newcat2['depth'].min()))
+        lines.append('Maximum matched depth: %s\n\n' %
+                     max(newcat1['depth'].max(), newcat2['depth'].max()))
 
-    lines.append('Minimum matched magnitude: %s\n' %
-                 min(newcat1['mag'].min(), newcat2['mag'].min()))
-    lines.append('Maximum matched magnitude: %s' %
-                 max(newcat1['mag'].max(), newcat2['mag'].max()))
+        lines.append('Minimum matched magnitude: %s\n' %
+                     min(newcat1['mag'].min(), newcat2['mag'].min()))
+        lines.append('Maximum matched magnitude: %s' %
+                     max(newcat1['mag'].max(), newcat2['mag'].max()))
 
+    else:
+        lines.append('-- Matching Criteria --\n')
+        lines.append('Time window: %s s\n' % otwindow)
+        lines.append('Distance window: %s km\n\n' % distwindow)
+
+        lines.append('-- Matching Results --\n')
+        lines.append('NO MATCHING EVENTS FOUND')
 
     with open('%s_comparisoncriteria.txt' % dirname, 'w') as compfile:
         for line in lines:
@@ -235,6 +246,9 @@ def find_closest(cat1, cat1name, cat1mids, cat2, dirname):
 @printstatus('Mapping events from both catalogs')
 def map_events(cat1, cat1name, cat2, cat2name, cat1mids, cat2mids, dirname):
     """Map matching events between catalogs."""
+    if len(cat1mids) == 0:
+        return
+
     lllat, lllon, urlat, urlon, _, _, _, clon = qcu.get_map_bounds(cat1, cat2)
 
     cat1lons, cat1lats, cat2lons, cat2lats = [], [], [], []
@@ -298,6 +312,9 @@ def map_unique_events(cat, catname, mids):
 def make_az_dist(cat1, cat1name, cat2, cat2name, cat1mids, cat2mids, dirname,
                  distwindow=100, numbins=16):
     """Make polar scatter/histogram of azimuth vs. distance."""
+    if len(cat1mids) == 0:
+        return
+
     azimuths, distances = qcu.get_azs_and_dists(cat1, cat2, cat1mids, cat2mids)
 
     width = 2*pi / numbins
@@ -332,6 +349,9 @@ def make_az_dist(cat1, cat1name, cat2, cat2name, cat1mids, cat2mids, dirname,
 def compare_params(cat1, cat1name, cat2, cat2name, cat1mids, cat2mids, param,
                    dirname):
     """Compare parameters of matched events."""
+    if len(cat1mids) == 0:
+        return
+
     cat1params, cat2params = [], []
 
     for ix, eid in enumerate(cat1mids):
@@ -373,6 +393,9 @@ def compare_params(cat1, cat1name, cat2, cat2name, cat1mids, cat2mids, param,
 def make_diff_hist(cat1, cat2, cat1mids, cat2mids, param, binsize, dirname,
                    title='', xlabel=''):
     """Make histogram of parameter differences between matched detections."""
+    if len(cat1mids) == 0:
+        return
+
     paramdiffs = []
 
     for idx, eid in enumerate(cat1mids):
@@ -485,9 +508,10 @@ def create_figures():
             except OSError as exception:
                 if exception.errno != errno.EEXIST:
                     raise
-            datadf1, datadf2 = qcu.get_data(cat1, catalog2=cat2,
-                startyear=startyear, endyear=endyear, minmag=minmag,
-                maxmag=maxmag)
+            datadf1 = qcu.get_data(cat1, dirname, startyear=startyear,
+                endyear=endyear, minmag=minmag, maxmag=maxmag)
+            datadf2 = qcu.get_data(cat2, dirname, startyear=startyear,
+                endyear=endyear, minmag=minmag, maxmag=maxmag)
         else:
             # Python 2
             try:
@@ -502,9 +526,10 @@ def create_figures():
                     except OSError as exception:
                         if exception.errno != errno.EEXIST:
                             raise
-                    datadf1, datadf2 = qcu.get_data(cat1, catalog2=cat2,
-                        startyear=startyear, endyear=endyear, minmag=minmag,
-                        maxmag=maxmag)
+                    datadf1 = qcu.get_data(cat1, dirname, startyear=startyear,
+                        endyear=endyear, minmag=minmag, maxmag=maxmag)
+                    datadf2 = qcu.get_data(cat2, dirname, startyear=startyear,
+                        endyear=endyear, minmag=minmag, maxmag=maxmag)
             # Python 3
             except:
                 try:
@@ -518,9 +543,10 @@ def create_figures():
                     except OSError as exception:
                         if exception.errno != errno.EEXIST:
                             raise
-                    datadf1, datadf2 = qcu.get_data(cat1, catalog2=cat2,
-                        startyear=startyear, endyear=endyear, minmag=minmag,
-                        maxmag=maxmag)
+                    datadf1 = qcu.get_data(cat1, dirname, startyear=startyear,
+                        endyear=endyear, minmag=minmag, maxmag=maxmag)
+                    datadf2 = qcu.get_data(cat2, dirname, startyear=startyear,
+                        endyear=endyear, minmag=minmag, maxmag=maxmag)
 
     else:
         from shutil import copy2
@@ -559,6 +585,10 @@ def create_figures():
     basic_cat_sum(datadf2, cat2, dirname)
     cat1ids, cat2ids, newcat1, newcat2 = match_events(datadf1, datadf2,
         dirname)
+
+    if len(cat1ids) == 0:
+        sys.stdout.write('*** No matching events found ***\n')
+
     comp_criteria(datadf1, cat1, cat1ids, datadf2, cat2, cat2ids, dirname)
     #find_closest(datadf1, cat1, cat1ids, datadf2, dirname)
 

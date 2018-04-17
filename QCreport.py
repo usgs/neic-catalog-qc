@@ -844,9 +844,8 @@ def create_figures():
             except OSError as exception:
                 if exception.errno != errno.EEXIST:
                     raise
-            datadf = qcu.get_data(catalog, startyear=startyear,
-                                  endyear=endyear, minmag=minmag,
-                                  maxmag=maxmag)
+            datadf = qcu.get_data(catalog, dirname, startyear=startyear,
+                endyear=endyear, minmag=minmag, maxmag=maxmag)
         else:
             # Python 2
             try:
@@ -858,9 +857,9 @@ def create_figures():
                     except OSError as exception:
                         if exception.errno != errno.EEXIST:
                             raise
-                    datadf = qcu.get_data(catalog, startyear=startyear,
-                                          endyear=endyear, minmag=minmag,
-                                          maxmag=maxmag)
+                    datadf = qcu.get_data(catalog, dirname,
+                        startyear=startyear, endyear=endyear, minmag=minmag,
+                        maxmag=maxmag)
             # Python 3
             except:
                 try:
@@ -871,9 +870,9 @@ def create_figures():
                     except OSError as exception:
                         if exception.errno != errno.EEXIST:
                             raise
-                    datadf = qcu.get_data(catalog, startyear=startyear,
-                                          endyear=endyear, minmag=minmag,
-                                          maxmag=maxmag)
+                    datadf = qcu.get_data(catalog, dirname,
+                        startyear=startyear, endyear=endyear, minmag=minmag,
+                        maxmag=maxmag)
 
     else:
         from shutil import copy2
