@@ -792,7 +792,7 @@ def create_figures():
 
     parser.add_argument('catalog', nargs='?', type=str,
                         help='pick which catalog to download data from; to \
-                        download data from all catalogs, use "all"')
+                        download data from all catalogs, use "preferred"')
     parser.add_argument('startyear', nargs='?', type=int,
                         help='pick starting year')
     parser.add_argument('endyear', nargs='?', type=int,
@@ -836,7 +836,7 @@ def create_figures():
         download = args.forcedownload
 
         dirname = '%s%s-%s' % (catalog, startyear, endyear) if catalog else\
-                  'all%s-%s' % (startyear, endyear)
+                  'preferred%s-%s' % (startyear, endyear)
 
         if download:
             try:

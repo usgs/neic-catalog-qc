@@ -288,6 +288,9 @@ def map_events(cat1, cat1name, cat2, cat2name, cat1mids, cat2mids, dirname):
 @printstatus('Mapping unassociated events')
 def map_unique_events(cat, catname, mids):
     """Map unassociated events from a catalog."""
+    if len(mids) == len(cat):
+        return
+
     cat = cat[~cat['id'].isin(mids)].reset_index(drop=True)
     lllat, lllon, urlat, urlon, _, _, _, clon = qcu.get_map_bounds(cat)
 
@@ -451,10 +454,12 @@ def create_figures():
     parser = argparse.ArgumentParser()
 
     parser.add_argument('catalog1', nargs='?', type=str,
-                        help='pick first catalog to download data from; if \
+                        help='pick first catalog to download data from; to \
+                        download data from all catalogs, use "preferred"; if \
                         using -sf, give catalog name')
     parser.add_argument('catalog2', nargs='?', type=str,
-                        help='pick second catalog to download data from; if \
+                        help='pick second catalog to download data from; to \
+                        download data from all catalogs, use "preferred"; if \
                         using -sf, give catalog name')
     parser.add_argument('startyear', nargs='?', type=int,
                         help='pick starting year; if using -sf, give first \
