@@ -181,7 +181,7 @@ def draw_grid(lats, lons, col, alpha=1):
     plt.gca().add_patch(poly)
 
 
-def trim_times(cat1, cat2, otwindow):
+def trim_times(cat1, cat2, otwindow=16):
     """Trim catalogs so they span the same time window."""
     mintime = max(cat1['time'].min(), cat2['time'].min())
     maxtime = min(cat1['time'].max(), cat2['time'].max())

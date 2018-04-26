@@ -142,17 +142,6 @@ def comp_criteria(cat1, cat1name, cat1mids, cat2, cat2name, cat2mids, dirname,
 @printstatus('Matching events')
 def match_events(cat1, cat2, dirname, otwindow=16, distwindow=100):
     """Match events within two catalogs."""
-    cat1.loc[:, 'convtime'] = [' '.join(x.split('T')) for x in
-                               cat1['time'].tolist()]
-    cat1.loc[:, 'convtime'] = cat1['convtime'].astype('datetime64[ns]')
-    cat1.loc[:, 'time'] = [qcu.to_epoch(x) for x in cat1['time']]
-    cat2.loc[:, 'convtime'] = [' '.join(x.split('T')) for x in
-                               cat2['time'].tolist()]
-    cat2.loc[:, 'convtime'] = cat2['convtime'].astype('datetime64[ns]')
-    cat2.loc[:, 'time'] = [qcu.to_epoch(x) for x in cat2['time']]
-
-    cat1, cat2 = qcu.trim_times(cat1, cat2, otwindow)
-
     cat1ids, cat2ids = [], []
     matchlines = [('Matching events using %ss time threshold and %skm '
                    'distance threshold\n') % (otwindow, distwindow),
@@ -588,6 +577,17 @@ def create_figures():
     os.chdir(dirname)
     basic_cat_sum(datadf1, cat1, dirname)
     basic_cat_sum(datadf2, cat2, dirname)
+
+    datadf1.loc[:, 'convtime'] = [' '.join(x.split('T')) for x in
+                               datadf1['time'].tolist()]
+    datadf1.loc[:, 'convtime'] = datadf1['convtime'].astype('datetime64[ns]')
+    datadf1.loc[:, 'time'] = [qcu.to_epoch(x) for x in datadf1['time']]
+    datadf2.loc[:, 'convtime'] = [' '.join(x.split('T')) for x in
+                               datadf2['time'].tolist()]
+    datadf2.loc[:, 'convtime'] = datadf2['convtime'].astype('datetime64[ns]')
+    datadf2.loc[:, 'time'] = [qcu.to_epoch(x) for x in datadf2['time']]
+    datadf1, datadf2 = qcu.trim_times(datadf1, datadf2)
+
     cat1ids, cat2ids, newcat1, newcat2 = match_events(datadf1, datadf2,
         dirname)
 
