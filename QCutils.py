@@ -252,16 +252,15 @@ def WW2000(mcval, mags, binsize):
 
 
 def get_data(catalog, dirname, startyear=2000, endyear=2000, minmag=-5,
-             maxmag=12, dev=False):
+             maxmag=12):
     """Download catalog data from earthquake.usgs.gov"""
-    year  = startyear
+    year = startyear
     catalog = catalog.lower()
     alldata = []
-    catname = catalog if catalog else 'all'
+    catname = catalog if catalog else 'preferred'
     fname = '%s%s-%s.csv' % (catname, startyear, endyear)
-    dev = str(dev).lower()
 
-    catstring = '&catalog={0}'.format(catname) if catname != 'all'\
+    catstring = '&catalog={0}'.format(catname) if catname != 'preferred'\
                  else ''
 
     bartotal = 12 * (endyear - startyear + 1)
