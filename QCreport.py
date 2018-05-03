@@ -188,7 +188,7 @@ def map_detecs(catalog, dirname, minmag=-5, mindep=-50, title=''):
                                c=bincolors[i], label=binnames[i], alpha=0.8,
                                zorder=10, transform=ccrs.PlateCarree())
 
-        plt.legend(loc='lower left')
+        plt.legend(loc='lower left', title='Magnitude')
 
     # if catalog does not have magnitude data
     else:
